@@ -16,6 +16,7 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(manifest.options_ui.page, "options.html");
   assert.ok(!manifest.permissions.includes("activeTab"));
   assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
+  assert.ok(manifest.host_permissions.includes("https://api.minimaxi.com/*"));
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
   assert.equal(manifest.version, "1.1.5");
 });
@@ -41,7 +42,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /^# YouTube Digest$/m);
   assert.match(
     readme,
-    /Turn every YouTube video into a resource for deep learning\./,
+    /Turn YouTube and Bilibili videos into resources for deep learning\./,
   );
   assert.doesNotMatch(readme, /before deciding how much of it to watch/i);
   assert.match(readme, /^## Install with your coding agent$/m);
@@ -64,7 +65,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /upstream issues and pull requests are not accepted/i);
   assert.doesNotMatch(readme, /^## Contributing$/m);
   assert.match(chineseReadme, /^# YouTube Digest$/m);
-  assert.match(chineseReadme, /把每个 YouTube 视频变成一份可以深入学习的资料/);
+  assert.match(chineseReadme, /把 YouTube 和 Bilibili 视频变成可以深入学习的资料/);
   assert.match(chineseReadme, /^## 让你的编程 Agent 帮你安装$/m);
   assert.match(
     chineseReadme,
@@ -121,8 +122,12 @@ test("release copy documents current scope without em dashes", () => {
   const optionsPage = read("options.html");
   const optionsStyles = read("options.css");
   const optionsScript = read("options.js");
-  assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
+  // Stage b1-6: Supadata onboarding URL moved into PLATFORM_COPY inside
+  // options.js, so the static options.html markup no longer carries the
+  // dash.supadata.ai link.
+  assert.match(optionsScript, /dash\.supadata\.ai\/auth\/sign-up/i);
+  assert.match(optionsScript, /platform\.deepseek\.com\/api_keys/i);
+  assert.match(optionsScript, /platform\.minimax\.io\/user-center/i);
   assert.doesNotMatch(optionsPage, /<select\b/i);
   assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl|aiModel)"/);
   const detailsTag = optionsPage.match(
@@ -179,8 +184,14 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(publishedDocs, /optional custom-origin/i);
   assert.doesNotMatch(publishedDocs, /chosen AI provider/i);
   assert.doesNotMatch(publishedDocs, /configure a different OpenAI-compatible/i);
-  assert.match(readme, /published version supports DeepSeek V4 Flash as its only AI provider/i);
-  assert.match(chineseReadme, /发布版本只支持 DeepSeek V4 Flash/);
+  assert.match(
+    readme,
+    /supports MiniMax M3 by default and DeepSeek V4 Flash as an optional alternative/i,
+  );
+  assert.match(
+    chineseReadme,
+    /默认使用 MiniMax M3[\s\S]*DeepSeek V4 Flash[\s\S]*可选替代/,
+  );
 });
 
 test("notes filters preserve selected contrast and expose pressed state", () => {
@@ -226,6 +237,8 @@ test("runtime has no source-file credential dependency or retired model", () => 
   assert.doesNotMatch(runtime, /importScripts\(["']config\.js/);
   assert.doesNotMatch(runtime, /\bdeepseek-chat\b/);
   assert.match(runtime, /deepseek-v4-flash/);
+  assert.match(runtime, /MiniMax-M3/);
+  assert.match(runtime, /api\.minimaxi\.com/);
 });
 
 test("retired Remix and reader files are absent", () => {

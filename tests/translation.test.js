@@ -329,7 +329,7 @@ test("background rejects unsupported language fallthrough and malformed batches"
   );
 });
 
-test("all AI product requests use DeepSeek non-thinking and JSON behavior", async () => {
+test("all AI product requests share the JSON body contract", async () => {
   const deepSeekRequests = [];
   const successfulFetch = (requests) => async (_url, options) => {
     requests.push(JSON.parse(options.body));
@@ -350,7 +350,13 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
     messages: [{ role: "user", content: "Hello." }],
   });
   assert.equal(deepSeekResult.text, "translated");
-  assert.deepEqual(deepSeekRequests[0].thinking, { type: "disabled" });
+  // DeepSeek's API doesn't define a `thinking` field; sending one would be
+  // an unknown body parameter. v4-flash is a non-reasoning model anyway, so
+  // we leave the field out for DeepSeek.
+  assert.ok(
+    !("thinking" in deepSeekRequests[0]),
+    `DeepSeek should not receive a thinking field, got body: ${JSON.stringify(deepSeekRequests[0])}`,
+  );
   assert.deepEqual(deepSeekRequests[0].response_format, {
     type: "json_object",
   });
@@ -358,7 +364,7 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
   const backgroundSource = read("background.js");
   assert.equal(
     (backgroundSource.match(/await requestAiCompletion\(\{/g) || []).length,
-    4,
+    5,
   );
   assert.doesNotMatch(backgroundSource, /disableThinking/);
   for (const callPath of [
@@ -366,12 +372,53 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
     "cleanupNoteText",
     "handleExplainSelection",
     "callAiTranslation",
+    "handleAddPunctuation",
   ]) {
     assert.match(
       backgroundSource,
       new RegExp(`async function ${callPath}\\([\\s\\S]*?requestAiCompletion\\(\\{`),
     );
   }
+});
+
+test("MiniMax M3 requests disable the default adaptive thinking", async () => {
+  const minimaxRequests = [];
+  const successfulFetch = (requests) => async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: "translated" } }],
+      }),
+    };
+  };
+
+  const minimax = loadBackgroundHelpers({
+    settings: {
+      provider: "minimax",
+      aiApiKey: "test-key",
+      aiBaseUrl: "https://api.minimaxi.com/v1",
+      aiModel: "MiniMax-M3",
+    },
+    fetchImpl: successfulFetch(minimaxRequests),
+  });
+  const result = await minimax.requestAiCompletion({
+    maxTokens: 128,
+    responseFormat: { type: "json_object" },
+    messages: [{ role: "user", content: "Hello." }],
+  });
+
+  assert.equal(result.text, "translated");
+  assert.equal(minimaxRequests.length, 1);
+  assert.equal(minimaxRequests[0].model, "MiniMax-M3");
+  // Per the MiniMax M3 Chat Completions schema, omitting `thinking` lets
+  // MiniMax-M3 default to `adaptive` (thinking on, emits a <think>...</think>
+  // block). Product features explicitly disable it so the trace doesn't
+  // leak into summaries / explain output.
+  assert.deepEqual(minimaxRequests[0].thinking, { type: "disabled" });
+  assert.deepEqual(minimaxRequests[0].response_format, {
+    type: "json_object",
+  });
 });
 
 test("blank-line chunks reset provider idle timeout and valid JSON succeeds", async () => {
@@ -593,4 +640,532 @@ test("Chinese prompt preserves natural bilingual-learning style rules", () => {
   assert.match(prompt, /Use 你, never 您/);
   assert.match(prompt, /spaces between Chinese and adjacent English words or digits/);
   assert.match(prompt, /source-language `text`/);
+});
+
+// ------------------------------------------------------------
+// cleanupNoteText() — note polish step in handleSaveNote.
+//
+// When the AI provider rejects the request (expired key, exhausted
+// quota, network blip) the note must still save — polish is a
+// best-effort step, not a hard requirement. The console message
+// must steer the user toward the right remediation instead of
+// looking like a code bug.
+//
+// The user hit this on a B站 video where their MiniMax M3 key had
+// been revoked; the raw fetch surfaced as
+//   "Error: invalid api key (2049)"
+// with status 401. The test below pins the new handling so the
+// next regression surfaces an actionable hint in the console.
+// ------------------------------------------------------------
+
+test(
+  "cleanupNoteText() falls back to raw text and warns with a settings hint when the AI key is rejected (401)",
+  async () => {
+    const helpers = loadBackgroundHelpers({
+      fetchImpl: async (url) => {
+        // `loadPromptSection()` reuses the same `fetch` shim to read
+        // `prompts/note-cleanup.md`; without this branch the prompt
+        // load fails before the AI call ever runs and the catch block
+        // falls through to the generic console.error path.
+        if (typeof url === "string" && url.startsWith("chrome-extension://")) {
+          return {
+            ok: true,
+            text: async () => read("prompts/note-cleanup.md"),
+          };
+        }
+        return {
+          ok: false,
+          status: 401,
+          body: undefined,
+          text: async () =>
+            JSON.stringify({
+              error: { message: "invalid api key (2049)", type: "auth_error" },
+            }),
+        };
+      },
+    });
+
+    // Capture console.warn / console.error so we can assert the
+    // catch block downgrades the generic "Cleanup error" to a
+    // targeted hint. The handleSaveNote path swallows this so the
+    // note save still returns success — the only visible signal of
+    // the failure is the console.
+    const warnings = [];
+    const errors = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (msg, ...rest) => warnings.push([msg, ...rest]);
+    console.error = (msg, ...rest) => errors.push([msg, ...rest]);
+    let result;
+    try {
+      result = await helpers.cleanupNoteText(
+        "target line",
+        "before line",
+        "after line",
+        "full transcript context",
+        "Video Title",
+      );
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+
+    // The note IS saved (with the raw buffer as fallback) so the
+    // user keeps the data even when their AI key is broken.
+    assert.equal(result, "before line target line after line");
+    assert.equal(
+      errors.length,
+      0,
+      "401 must NOT log a generic console.error — it should be an actionable warn",
+    );
+    assert.ok(
+      warnings.length >= 1,
+      "401 must emit a console.warn with the settings hint",
+    );
+    const [hint, detail] = warnings[0];
+    assert.match(
+      hint,
+      /Note saved without AI polish/,
+      "the hint must make clear the note was still saved — users panic when they think the note vanished",
+    );
+    assert.match(
+      hint,
+      /API key|Update it in.*Settings/i,
+      "the hint must point at YouTube Digest Settings so the user knows where to fix the key",
+    );
+    // The underlying provider message is appended as a second
+    // argument so an experienced user / support engineer can still
+    // see the raw "invalid api key (2049)" detail.
+    assert.match(
+      String(detail),
+      /invalid api key \(2049\)/,
+      "the raw provider message must be preserved for diagnostics",
+    );
+  },
+);
+
+test(
+  "cleanupNoteText() falls back to raw text and warns when the AI provider is rate-limited (429)",
+  async () => {
+    const helpers = loadBackgroundHelpers({
+      fetchImpl: async (url) => {
+        // Mirror the 401 test above: route prompt loads back to the
+        // real file so the catch block under test sees the AI 429,
+        // not a pre-AI `Could not load prompt file` rejection.
+        if (typeof url === "string" && url.startsWith("chrome-extension://")) {
+          return {
+            ok: true,
+            text: async () => read("prompts/note-cleanup.md"),
+          };
+        }
+        return {
+          ok: false,
+          status: 429,
+          body: undefined,
+          text: async () =>
+            JSON.stringify({
+              error: {
+                message: "rate limit exceeded",
+                type: "rate_limit_error",
+              },
+            }),
+        };
+      },
+    });
+
+    const warnings = [];
+    const errors = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (msg, ...rest) => warnings.push([msg, ...rest]);
+    console.error = (msg, ...rest) => errors.push([msg, ...rest]);
+    let result;
+    try {
+      result = await helpers.cleanupNoteText(
+        "target",
+        "before",
+        "",
+        "context",
+        "title",
+      );
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+
+    // Only before/target are joined when after is empty.
+    assert.equal(result, "before target");
+    assert.equal(errors.length, 0, "429 must NOT log a generic console.error");
+    assert.equal(warnings.length, 1);
+    const [hint] = warnings[0];
+    assert.match(hint, /Note saved without AI polish/);
+    assert.match(hint, /rate-limited/);
+  },
+);
+
+// ------------------------------------------------------------
+// logAiConsumerError() — shared console helper used by the
+// analyze / translate / explain / save catch blocks.
+//
+// Each AI consumer path catches its own `requestAiCompletion()`
+// rejection. Before this helper existed every catch block did its
+// own `console.error` first, which leaked the raw provider
+// message (e.g. "invalid api key (2049)") as a scary red error
+// even though the only real fix was "update Settings". The
+// helper downgrades 401 / 429 / NO_AI_KEY to actionable
+// console.warns and keeps console.error for everything else so
+// genuine bugs stay visible.
+// ------------------------------------------------------------
+
+function captureConsole() {
+  const warnings = [];
+  const errors = [];
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  console.warn = (msg, ...rest) => warnings.push([msg, ...rest]);
+  console.error = (msg, ...rest) => errors.push([msg, ...rest]);
+  return {
+    warnings,
+    errors,
+    restore() {
+      console.warn = originalWarn;
+      console.error = originalError;
+    },
+  };
+}
+
+test(
+  "logAiConsumerError() downgrades a 401 to a Settings-pointing console.warn and never emits console.error",
+  () => {
+    const helpers = loadBackgroundHelpers();
+    const capture = captureConsole();
+    try {
+      const err = new Error("invalid api key (2049)");
+      err.status = 401;
+      helpers.logAiConsumerError("Analysis", err);
+    } finally {
+      capture.restore();
+    }
+    assert.equal(capture.errors.length, 0);
+    assert.equal(capture.warnings.length, 1);
+    const [hint, detail] = capture.warnings[0];
+    assert.match(hint, /\[YouTube Digest\] Analysis skipped/);
+    assert.match(hint, /API key/);
+    assert.match(hint, /Update it in.*Settings/i);
+    assert.equal(
+      String(detail),
+      "invalid api key (2049)",
+      "raw provider message must be preserved as the second arg for diagnostics",
+    );
+  },
+);
+
+test(
+  "logAiConsumerError() downgrades a 429 to a retry-hint console.warn",
+  () => {
+    const helpers = loadBackgroundHelpers();
+    const capture = captureConsole();
+    try {
+      const err = new Error("rate limit exceeded");
+      err.status = 429;
+      helpers.logAiConsumerError("Translation", err);
+    } finally {
+      capture.restore();
+    }
+    assert.equal(capture.errors.length, 0);
+    assert.equal(capture.warnings.length, 1);
+    const [hint, detail] = capture.warnings[0];
+    assert.match(hint, /\[YouTube Digest\] Translation skipped/);
+    assert.match(hint, /rate-limited/);
+    assert.match(hint, /Try again shortly/i);
+    assert.equal(String(detail), "rate limit exceeded");
+  },
+);
+
+test(
+  "logAiConsumerError() downgrades a NO_AI_KEY code to a configure-hint console.warn",
+  () => {
+    const helpers = loadBackgroundHelpers();
+    const capture = captureConsole();
+    try {
+      const err = new Error("AI API key not configured.");
+      err.code = "NO_AI_KEY";
+      helpers.logAiConsumerError("Explain selection", err);
+    } finally {
+      capture.restore();
+    }
+    assert.equal(capture.errors.length, 0);
+    assert.equal(capture.warnings.length, 1);
+    const [hint] = capture.warnings[0];
+    assert.match(hint, /\[YouTube Digest\] Explain selection skipped/);
+    assert.match(hint, /not configured/);
+    assert.match(hint, /Open YouTube Digest Settings/i);
+  },
+);
+
+test(
+  "logAiConsumerError() keeps console.error for genuine failures (timeouts, network drops, parse errors)",
+  () => {
+    const helpers = loadBackgroundHelpers();
+    const capture = captureConsole();
+    try {
+      helpers.logAiConsumerError(
+        "Analysis",
+        Object.assign(new Error("aborted"), { name: "AbortError" }),
+      );
+      helpers.logAiConsumerError(
+        "Translation",
+        Object.assign(new Error("AI provider returned an empty response."), {
+          code: "EMPTY_AI_RESPONSE",
+        }),
+      );
+      helpers.logAiConsumerError(
+        "Explain selection",
+        new Error("Failed to fetch"),
+      );
+      helpers.logAiConsumerError("Save note", null);
+    } finally {
+      capture.restore();
+    }
+    assert.equal(capture.warnings.length, 0, "non-401/429/NO_AI_KEY must NOT warn");
+    assert.equal(capture.errors.length, 4, "every other failure must keep console.error");
+    const prefixes = capture.errors.map((entry) => entry[0]);
+    assert.ok(prefixes.every((prefix) => prefix.startsWith("[YouTube Digest] ")));
+    assert.ok(prefixes.some((prefix) => prefix.includes("Analysis:")));
+    assert.ok(prefixes.some((prefix) => prefix.includes("Translation:")));
+    assert.ok(prefixes.some((prefix) => prefix.includes("Explain selection:")));
+    assert.ok(prefixes.some((prefix) => prefix.includes("Save note:")));
+  },
+);
+
+// ------------------------------------------------------------
+// parseLooseJson robustness
+//
+// MiniMax-M3 can leave a <think>...</think> trace in
+// `choices[0].message.content` even when the request sets
+// `thinking: {type: "disabled"}` (e.g. on the no-`response_format` retry
+// path, or when the provider silently ignores the field). The block can
+// contain JSON-shaped examples that would otherwise break our
+// "first { to last }" isolation in parseLooseJson. These tests pin down
+// that the parser recovers from that contamination in both unit and
+// end-to-end shapes.
+// ------------------------------------------------------------
+
+test("parseLooseJson strips MiniMax-M3 <think> blocks before isolating braces", () => {
+  const { parseLooseJson } = loadBackgroundHelpers();
+  const thinkingWithExample = [
+    "<think>",
+    "The user wants a Simplified Chinese translation. I will output",
+    '{"segments":[{"id":"seg-1","text":"example"}]}',
+    "in the right shape, then emit the final answer below.",
+    "</think>",
+    "",
+    "",
+    '{"segments":[{"id":"seg-1","text":"翻译后的内容"}]}',
+  ].join("\n");
+  // The parser runs inside `vm.runInNewContext`, which gives parsed objects a
+  // null prototype. Round-tripping through JSON rebuilds them with the
+  // call-realm's Object prototype so assert.deepEqual doesn't trip on it.
+  assert.deepEqual(JSON.parse(JSON.stringify(parseLooseJson(thinkingWithExample))), {
+    segments: [{ id: "seg-1", text: "翻译后的内容" }],
+  });
+});
+
+test("parseLooseJson leaves unclosed <think> blocks alone and still parses the JSON", () => {
+  const { parseLooseJson } = loadBackgroundHelpers();
+  // No closing tag. The think block stays; the JSON after it is what we want.
+  const malformed = [
+    "<think>The model forgot to close",
+    '{"segments":[{"id":"seg-2","text":"翻译"}]}',
+  ].join("\n");
+  assert.deepEqual(JSON.parse(JSON.stringify(parseLooseJson(malformed))), {
+    segments: [{ id: "seg-2", text: "翻译" }],
+  });
+});
+
+test(
+  "handleTranslateContent recovers when AI leaks<think> block into content",
+  async () => {
+    const aiContent = [
+      "<think>",
+      "Plan: I need to output a JSON object shaped like",
+      '{"segments":[{"id":"seg-1","text":"example"}]}',
+      "so the parser needs to skip my reasoning.",
+      "</think>",
+      '{"segments":[{"id":"seg-1","text":"翻译后的内容"}]}',
+    ].join("\n");
+
+    const aiResponseJson = JSON.stringify({
+      choices: [{ message: { content: aiContent } }],
+    });
+
+    const fetchMock = async (url) => {
+      if (typeof url === "string" && url.includes("translation.md")) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => read("prompts/translation.md"),
+        };
+      }
+      // AI response: deliver via the .text() fallback so readBoundedAiResponse
+      // can JSON.parse it directly.
+      return {
+        ok: true,
+        status: 200,
+        text: async () => aiResponseJson,
+      };
+    };
+
+    const helpers = loadBackgroundHelpers({ fetchImpl: fetchMock });
+    const result = await helpers.handleTranslateContent(
+      { segments: [{ id: "seg-1", text: "original text" }] },
+      "transcriptBatch",
+      "zh",
+      "Test video",
+    );
+
+    assert.equal(result.success, true);
+    assert.ok(result.translatedContent);
+    assert.equal(result.translatedContent.segments.length, 1);
+    assert.equal(result.translatedContent.segments[0].id, "seg-1");
+    assert.equal(result.translatedContent.segments[0].text, "翻译后的内容");
+  },
+);
+
+test("punctuateChineseText skips text with no Chinese characters", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  assert.equal(punctuateChineseText("hello world"), "hello world");
+  assert.equal(punctuateChineseText("plain ASCII only"), "plain ASCII only");
+  assert.equal(punctuateChineseText(""), "");
+  assert.equal(punctuateChineseText(null), null);
+  assert.equal(punctuateChineseText(undefined), undefined);
+});
+
+test("punctuateChineseText is a no-op when CJK punctuation is already present", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  assert.equal(
+    punctuateChineseText("这是一个完整的句子。"),
+    "这是一个完整的句子。",
+  );
+  assert.equal(
+    punctuateChineseText("已经，带逗号了"),
+    "已经，带逗号了",
+  );
+  assert.equal(punctuateChineseText("你好！"), "你好！");
+  assert.equal(punctuateChineseText("问句？"), "问句？");
+  // Fullwidth comma must also short-circuit the pass.
+  assert.equal(punctuateChineseText("Ａ（逗号）Ｂ"), "Ａ（逗号）Ｂ");
+});
+
+test("punctuateChineseText inserts commas at mid-sentence connectives", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  assert.equal(
+    punctuateChineseText("他想去但是没有时间"),
+    "他想去，但是没有时间",
+  );
+  assert.equal(
+    punctuateChineseText("因为下雨所以取消"),
+    "因为下雨，所以取消",
+  );
+  assert.equal(
+    punctuateChineseText("如果有空那么我们就出发"),
+    "如果有空，那么我们就出发",
+  );
+});
+
+test("punctuateChineseText leaves 没那么 / 不那么 fixed expressions intact", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  // "没那么" / "不那么" are degree adverbs, NOT a conditional "那么"
+  // clause. The "没" / "不" exclusion on 那么 keeps them whole.
+  assert.equal(
+    punctuateChineseText("问题没那么严重别担心"),
+    "问题没那么严重别担心",
+  );
+  assert.equal(
+    punctuateChineseText("其实不那么重要"),
+    "其实，不那么重要",
+  );
+  // "有那么重要" / "有那么回事" must also stay whole.
+  assert.equal(
+    punctuateChineseText("有那么重要吗"),
+    "有那么重要吗",
+  );
+  // But genuine "如果 … 那么 …" conditional clauses still get punctuated.
+  assert.equal(
+    punctuateChineseText("如果下雨那么就取消"),
+    "如果下雨，那么就取消",
+  );
+});
+
+test("punctuateChineseText inserts commas after sentence-leading transitions", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  assert.equal(
+    punctuateChineseText("首先我们要讨论预算"),
+    "首先，我们要讨论预算",
+  );
+  assert.equal(
+    punctuateChineseText("然后他们继续讨论方案"),
+    "然后，他们继续讨论方案",
+  );
+  assert.equal(
+    punctuateChineseText("其实问题没有那么严重"),
+    "其实，问题没有那么严重",
+  );
+});
+
+test("punctuateChineseText never adds a leading comma at the start of text", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  assert.equal(
+    punctuateChineseText("但是没有时间"),
+    "但是没有时间",
+  );
+  assert.equal(
+    punctuateChineseText("因为下雪了所以取消"),
+    "因为下雪了，所以取消",
+  );
+  // Start markers ARE allowed at position 0 because we only insert AFTER them.
+  assert.equal(punctuateChineseText("首先讨论预算"), "首先，讨论预算");
+});
+
+test("punctuateChineseText is idempotent", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  const input =
+    "他想去但是没有时间因为下雪了首先取消活动然后再通知大家";
+  const once = punctuateChineseText(input);
+  const twice = punctuateChineseText(once);
+  assert.equal(once, twice);
+});
+
+test("punctuateChineseText restores readability on a realistic wall of text", () => {
+  const { punctuateChineseText } = loadSidepanelHelpers();
+  const input =
+    "然后我们可以看到这个数据其实非常有趣因为它反映了用户的行为模式首先用户会浏览然后点击最后购买";
+  const result = punctuateChineseText(input);
+  const inputCommas = (input.match(/，/g) || []).length;
+  const resultCommas = (result.match(/，/g) || []).length;
+  assert.ok(
+    resultCommas >= 4,
+    `expected >=4 commas after restore, got ${resultCommas} in ${JSON.stringify(result)}`,
+  );
+  assert.ok(
+    resultCommas > inputCommas,
+    "expected restore to add at least one comma",
+  );
+  // The wall-of-text must not become longer than the original by more than
+  // the number of inserted commas — no spurious characters.
+  assert.equal(result.length - input.length, resultCommas - inputCommas);
+  // Spot-check the two most important transitions survived.
+  assert.match(result, /首先，/);
+  assert.match(result, /，因为/);
+});
+
+test("normalizeCaptionText applies the Chinese punctuation restore on output", () => {
+  const { normalizeCaptionText } = loadSidepanelHelpers();
+  // The wall-of-text now exits normalizeCaptionText with a comma inserted.
+  const input =
+    "然后我们可以看到这个数据其实非常有趣因为它反映了用户的行为模式";
+  const output = normalizeCaptionText(input);
+  assert.match(output, /，因为/);
+  assert.match(output, /其实，/);
+  assert.match(output, /然后，/);
 });

@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-把每个 YouTube 视频变成一份可以深入学习的资料。YouTube Digest 把字幕、双语翻译、AI 概览、内容讲解和时间戳笔记放进同一个 Chrome 侧边栏，让你可以持续学习视频中的知识和语言，同时不丢失原视频上下文。
+把 YouTube 和 Bilibili 视频变成可以深入学习的资料。YouTube Digest 把字幕、双语翻译、AI 概览、内容讲解和时间戳笔记放进同一个 Chrome 侧边栏，让你可以持续学习视频中的知识和语言，同时不丢失原视频上下文。
 
 - 把零碎字幕变成清晰、可搜索的学习资料。
 - 查看原文、简体中文翻译，或中英双语对照字幕来学习语言。
@@ -22,7 +22,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 你的 Agent 应该帮你：
 
 1. 先询问你想把项目长期保存在哪里，再下载或克隆到那里，并告诉你准确的完整路径。如果你需要建议，可以推荐 macOS 或 Linux 上的 `~/Documents/youtube-digest`，或 Windows 上的 `%USERPROFILE%\Documents\youtube-digest`。
-2. 打开下方 Supadata 和 DeepSeek 官方页面，指导你创建自己的账号。
+2. 打开下方 Supadata 官方页面和你要使用的 AI 提供商页面（MiniMax 或 DeepSeek），指导你创建自己的账号。
 3. 指导你在 Chrome 中通过“加载已解压的扩展程序”选择你刚才确定的那个准确项目文件夹。
 4. 告诉你应该在扩展的“设置”页面哪个位置填写 API Key。
 5. 打开一个带字幕的 YouTube 视频，确认字幕和翻译功能可以使用。
@@ -48,10 +48,10 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ## 设置 API Key
 
-YouTube Digest 需要你在自己的服务账号中准备两个 Key：
+YouTube Digest 需要一个 AI Key 和至少一个字幕服务凭证，对应你实际使用的平台：
 
-1. **Supadata API Key**，用于获取 YouTube 字幕。
-2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
+1. **字幕服务凭证**，按平台选用：YouTube 需要 **Supadata API Key**；Bilibili 需要你自己的 **SESSDATA cookie**（除非视频本身带有 CC 公共字幕）。只配置你会访问的平台即可，侧边栏会在遇到没有配置凭证的视频时给出提示。
+2. **AI 提供商 Key**，用于生成概览、讲解内容、翻译和自动润色笔记。YouTube Digest 默认使用 MiniMax M3，也可以在设置中切换到 DeepSeek V4 Flash。选择任一提供商后，界面和功能都保持一致。
 
 ### 获取 Supadata API Key
 
@@ -63,33 +63,72 @@ YouTube Digest 需要你在自己的服务账号中准备两个 Key：
 
 如果页面流程发生变化，请查看 [Supadata 官方文档](https://docs.supadata.ai/)。
 
-### 获取 DeepSeek API Key
+### 获取 Bilibili SESSDATA cookie
+
+YouTube Digest 通过 Bilibili 官方播放接口（`api.bilibili.com/x/player/v2`）获取字幕。带有 CC 公共字幕的视频不需要登录。会员专享、登录后才能观看或只有登录后才能加载字幕的视频，需要使用你自己的 SESSDATA cookie。
+
+复制 SESSDATA 的方法：
+
+1. 在 Chrome 中登录 [bilibili.com](https://www.bilibili.com)。
+2. 按 `F12`（macOS 上 `Cmd+Option+I`）打开 **开发者工具**。
+3. 切换到 **Application** 标签页。如果看不到，点击右上角 `>>` 并选择 **Application**。
+4. 在左侧展开 **Cookies**，选中 `https://www.bilibili.com`。
+5. 找到名为 `SESSDATA` 的行，双击 **Value** 列并复制内容。
+6. 把值粘贴到 YouTube Digest 设置中的 **Bilibili SESSDATA cookie** 输入框。
+
+也可以在浏览器 Console（Application 标签页 → Console）中执行：
+
+```js
+document.cookie.match(/SESSDATA=([^;]+)/)?.[1]
+```
+
+控制台会直接输出 cookie 值，复制后粘贴到设置即可。该 cookie 仅保存在你 Chrome 扩展的本地存储中，YouTube Digest 只会在向 Bilibili 自身播放接口发送请求时附带它。退出 Bilibili 登录后 cookie 失效，可以随时按同样方式重新复制。
+
+av 号视频（例如 `https://www.bilibili.com/video/av170001`）暂不支持，请在 Bilibili 上打开对应的 BV 号 URL 后再使用。
+
+### 获取 MiniMax M3 API Key（默认 AI 提供商）
+
+1. 打开 MiniMax 官方 [Key 页面](https://platform.minimax.io/user-center/basic-information/interface-key)。
+2. 按照提示登录，或创建 MiniMax 账号。
+3. 点击 **Create new key**，填写容易识别的名称，例如 `YouTube Digest`，然后创建 Key。
+4. 立即复制 Key。完整 Key 可能只会显示一次。
+5. 把 Key 粘贴到 YouTube Digest 设置中的 **AI provider key**（输入框的标签会随你选择的提供商变化）。
+6. 如果 MiniMax 提示余额不足，请充值后再试。
+
+当前账号和接口说明请查看 [MiniMax 官方 API 文档](https://platform.minimax.io/)。
+
+### 获取 DeepSeek API Key（可选替代提供商）
 
 1. 打开 DeepSeek 官方 [API Keys 页面](https://platform.deepseek.com/api_keys)。
 2. 按照提示登录，或创建 DeepSeek 开放平台账号。
 3. 点击 **Create new API key**，填写容易识别的名称，例如 `YouTube Digest`，然后创建 Key。
 4. 立即复制 Key。完整 Key 可能只会显示一次。
-5. 把 Key 粘贴到 YouTube Digest 设置中的 **DeepSeek API key**。
+5. 在 YouTube Digest 设置中将 AI 提供商单选切到 **DeepSeek V4 Flash**，然后把 Key 粘贴到 **AI provider key**。
 6. 如果 DeepSeek 提示余额不足，请在 DeepSeek 开放平台账号中充值后再试。
 
 当前账号和接口说明请查看 [DeepSeek 官方 API 文档](https://api-docs.deepseek.com/)。
 
 在侧边栏中打开 **Settings**。你也可以在 `chrome://extensions` 的 YouTube Digest 卡片中打开扩展选项。Key 只能粘贴到这些设置输入框中。不要把 Key 发送到 AI 对话、项目文件、截图或公开消息中。
 
-发布版本只支持 DeepSeek V4 Flash：
+发布版本默认使用 MiniMax M3，并支持 DeepSeek V4 Flash 作为可选替代。每个提供商的接口地址和模型都固定，你只需要在设置中选择提供商，然后粘贴对应的 API Key：
 
 ```text
+默认提供商：MiniMax M3
+Base URL: https://api.minimaxi.com/v1
+Model: MiniMax-M3
+
+可选替代：DeepSeek V4 Flash
 Base URL: https://api.deepseek.com
 Model: deepseek-v4-flash
 ```
 
-YouTube Digest 会让所有 DeepSeek 请求使用非思考模式，以获得更快、更稳定的交互。设置中的接口地址和模型固定，只需要填写 DeepSeek API Key。如果想使用其他服务或模型，请在设置中复制安全的自定义 prompt，让编程 Agent 修改你自己的本地副本。不要把任何 API Key 放进 prompt 或对话。
+YouTube Digest 会让所有 AI 请求使用非思考模式，以获得更快、更稳定的交互。在设置页面的单选列表中选择你想使用的提供商，然后粘贴对应的 API Key。如果想使用其他服务或模型，请在设置中复制安全的自定义 prompt，让编程 Agent 修改你自己的本地副本。不要把任何 API Key 放进 prompt 或对话。
 
 API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布包不会包含或使用 `config.js`。
 
 ## 使用 YouTube Digest
 
-1. 打开一个有字幕的普通 YouTube 视频页面。
+1. 打开一个有字幕的普通 YouTube 视频页面，或者一个有字幕的 Bilibili `/video/BV...` 页面。
 2. 点击 YouTube Digest 扩展图标，打开侧边栏。
 3. 阅读带时间戳的字幕，或选择 **Original**、**中文**、**双语**。
 4. 打开 **Overview**，查看 AI 生成的章节和重点引用。
@@ -100,11 +139,12 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 - Chrome 116 或更高版本。
 - 标准的 `youtube.com/watch` 视频页面。
+- 标准的 `bilibili.com/video/BV...` 视频页面（带原生字幕）。带 CC 公共字幕的视频不需要 SESSDATA，登录后才能观看或加载字幕的视频需要在设置中填入你自己的 SESSDATA。
 - Supadata 能够返回的原生字幕。YouTube Digest 会优先请求英文字幕，也可能显示其他可用的原生语言。
 - 原文、简体中文和双语对照字幕。
-- AI 概览、选中文本讲解、翻译和自动润色笔记。
+- AI 概览、选中文本讲解、翻译、自动润色笔记，以及为无标点中文 transcript 加标点。
 - 本地笔记，以及最近字幕、概览和翻译的本地缓存。
-- 发布版本的所有 AI 功能都使用 DeepSeek V4 Flash。其他服务需要修改本地代码，不属于发布版本的支持范围。
+- 发布版本的所有 AI 功能默认使用 MiniMax M3，也支持可选的 DeepSeek V4 Flash。在设置中选择你需要的提供商。其他服务或模型需要修改本地代码，不属于发布版本的支持范围。
 
 Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
@@ -140,6 +180,21 @@ DeepSeek 说明这些价格可能很快上调，因此使用此估算前必须�
 
 翻译是延迟按需和渐进式的。已缓存的分段会复用，只有滚动到并请求的字幕行才会发起调用。重试、服务商行为和价格变化都可能增加最终成本。
 
+## AI 加标点功能、消耗与降级
+
+B 站自动 AI 字幕经常是不带任何标点的中文连续字符串，逐字阅读非常吃力。从 2026 年 8 月开始，每次 digest 都会先把获取到的 transcript 发给当前选中的 AI 提供商做一次"加标点"润色：模型只插入中文标点（，。！？），不会改字、不会改顺序、不会动时间戳行。原始的 `TRANSCRIPT:` 区块在导出的 .txt 文件里、侧边栏的 Original 标签里、笔记和讲解内容里都会显示带标点的版本；video description 保持原样。
+
+加标点调用复用 Overview / 讲解 / 翻译同一条 AI 请求路径，单次请求大约 3–8 秒，token 用量比翻译小得多（典型一次 digest 输入 2,000–8,000 token，输出 1,000–3,000 token）。具体价格请看上方 DeepSeek 价格页面和你的 AI 账号账单。
+
+降级行为：以下任何一种情况发生时，YouTube Digest 会安静地回退到现有的本地启发式加逗号逻辑，UI 不会卡住、不会报错、也不会打断导出。
+
+- 没有填写 AI Key（`NO_AI_KEY`）。
+- 关闭了"AI 加标点"开关（`DISABLED`，见下文）。
+- 服务商返回 429 / 5xx / 超时 / 空内容 / 输出被截断（`AI_RATE_LIMITED` 或 `IMPLAUSIBLE_OUTPUT`）。
+- transcript 里已经检测到 CJK 标点（`already_punctuated`），直接复用，不发起调用。
+
+如何关闭：打开侧边栏 **Settings** 或扩展的 **Options** 页面，在 AI 提供商区块下方的 **AI add punctuation to Chinese transcripts** 复选框取消勾选。关闭后，每次 digest 会跳过 AI 调用，UI 和导出直接显示本地启发式加逗号后的版本。复选框默认勾选；如需在另一台设备上恢复，重新打开即可。
+
 ## 用编程 Agent 改造成自己的版本
 
 这是一个个人 Remix 项目，不接受上游 Issue 或 Pull Request。如果功能出错，或者你想增加新功能，请下载或 Fork 自己的副本，再让你的编程 Agent 帮你修复、改造和个性化。
@@ -163,9 +218,10 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 YouTube Digest 会直接从扩展向服务商发送请求：
 
 1. 把标准化的 YouTube 视频地址发送给 Supadata，用于获取原生字幕。
-2. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
-3. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
-4. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
+2. 处理 Bilibili 视频时，把标准化的 `/video/BV...` 地址发送给 `api.bilibili.com/x/web-interface/view` 和 `/x/player/v2`，并在配置了 SESSDATA 时附带作为身份验证。
+3. 当你使用 AI 功能时，把字幕和相关视频信息发送给你在设置中选择的提供商（MiniMax 或 DeepSeek）。
+4. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
+5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
 
 YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理数据。详情请查看 [PRIVACY.md](PRIVACY.md)。
 
@@ -200,12 +256,34 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 
 YouTube Digest 不会自动改用 AI 生成字幕。
 
+### Bilibili 视频找不到字幕
+
+- 先确认视频在 Bilibili 网页播放器上自带字幕（点击 CC 验证）。
+- 带 CC 公共字幕的视频理论上不需要 SESSDATA。如果仍然失败，请登录 Bilibili 后在设置中填入 SESSDATA。
+- av 号 URL 暂不支持，请在 Bilibili 上打开对应的 BV 号 URL 再试。
+- `BILIBILI_VIEW_ERROR` 或 `BILIBILI_PLAYER_ERROR` 通常意味着 Bilibili 接口拒绝了 SESSDATA、cookie 已过期，或视频有地区限制。可以重新从开发者工具中复制一次 SESSDATA 再试。
+- 如果一直看到 `NO_BILIBILI_COOKIE`，请打开设置确认 SESSDATA 输入框已保存。
+
+### Bilibili 视频页面没有显示 Digest 按钮
+
+- 在 `chrome://extensions` 中找到 YouTube Digest，点击“重新加载”，然后刷新 Bilibili 页面。
+- 确认当前是 `https://www.bilibili.com/video/BV...`（或 `/video/av...`），而不是番剧页面（`/bangumi/play/...`）或首页。
+- 当前版本针对 Bilibili 公开网页版布局。如果 Bilibili 改版导致操作栏变化，按钮可能暂时无法显示；可以让你的编程 Agent 在该具体视频页面检查 content script。
+
 ### AI 请求失败
 
 - `401` 或 `403` 通常表示 DeepSeek Key 或账号权限有问题。
 - `429` 通常表示达到了 DeepSeek 服务限速或消费上限。
 - 确认 Key 来自上方链接的 DeepSeek 开放平台账号，并且账号有可用额度。
 - 如果你把本地副本改成了其他模型，请再次使用设置中的自定义 prompt，让编程 Agent 检查本地实现。
+- `AI_RATE_LIMITED` 只来自 AI 加标点调用：触发时 YouTube Digest 会回退到本地启发式，UI 不会出现错误；想彻底关掉加标点调用，请在 Settings 中取消勾选 **AI add punctuation**。
+
+### AI 加标点没有效果或看起来没启用
+
+- Settings 里 **AI add punctuation to Chinese transcripts** 复选框必须保持勾选（默认勾选）。取消勾选后每次 digest 都会跳过 AI 加标点。
+- AI 调用失败时，UI 不会提示，但 transcript 会自动回退到本地启发式加逗号版本。要确认 AI 真的跑了，可以打开扩展的 Service Worker 控制台，搜索 `Punctuation batch` 调试日志。
+- 长视频 transcript 会被自动按 `[M:SS]` 时间戳切分成多个批次，每个批次独立调用 AI，然后拼接。整个 transcript 全部 AI 完成后才会显示带标点版本；这段时间里 UI 会先显示原始未标点文本，等候 AI 返回。
+- 已经含中文标点的 transcript（典型为 YouTube 官方字幕、CC 公共字幕）会被检测为 `already_punctuated`，跳过 AI 调用；UI 显示的标点其实是 Supadata / Bilibili 自带的结果。
 
 不要在对话、截图或日志中分享 API Key、私密字幕或个人笔记。
 

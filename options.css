@@ -168,7 +168,6 @@ a {
   font-size: 13px;
 }
 
-.provider-summary,
 .copy-actions {
   display: flex;
   align-items: center;
@@ -176,20 +175,98 @@ a {
   gap: 10px;
 }
 
-.provider-summary {
-  justify-content: space-between;
-  margin-bottom: 18px;
+.provider-options {
+  margin: 0 0 18px;
   padding: 13px 14px;
   border: 1px solid #ecd8ce;
   border-radius: 12px;
   background: #fdf6f2;
+  /* Reset fieldset's intrinsic min-width so the radio list can shrink inside
+     the card without forcing the surrounding layout to overflow. */
+  min-width: 0;
 }
 
-.provider-name {
+/* Stage b1-6: per-platform transcript-key sub-sections. Rendered by
+   options.js from YTD_PLATFORMS.list() so adding a new adapter surfaces a
+   matching field without editing this stylesheet. */
+.transcript-providers {
+  display: grid;
+  gap: 16px;
+}
+
+.platform-card {
+  margin: 0;
+  padding: 16px 18px;
+  border: 1px solid #ecd8ce;
+  border-radius: 14px;
+  background: #fdf6f2;
+}
+
+.platform-card h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
   font-weight: 800;
 }
 
-.provider-badge,
+.platform-card .help {
+  margin-top: 8px;
+}
+
+.provider-radio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 6px 4px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.provider-radio:hover {
+  color: var(--accent-hover);
+}
+
+.provider-radio input[type="radio"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.provider-radio:has(input:checked) {
+  color: var(--accent-hover);
+  font-weight: 800;
+}
+
+/* Stage t05 (AI punctuation): single-row checkbox that lives inside the AI
+   provider card. Uses the same accent color as the provider radio so the
+   two controls feel like one family. The help line is indented to align
+   under the label text, not the checkbox itself. */
+.ai-punctuation-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 4px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ai-punctuation-toggle input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.ai-punctuation-toggle:hover {
+  color: var(--accent-hover);
+}
+
+.ai-punctuation-help {
+  margin: 0 0 0 26px;
+  font-size: 13px;
+}
+
 .agent-badge {
   padding: 4px 9px;
   border-radius: 999px;

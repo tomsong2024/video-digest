@@ -149,13 +149,28 @@ test("customization guidance is concise and has a visible placeholder reminder",
 
 test("customization prompt switches languages and preserves technical values", () => {
   const html = read("options.html");
+  const optionsScript = read("options.js");
   const englishPrompt = options.translate("en", "customizationPrompt");
   const chinesePrompt = options.translate("zh-CN", "customizationPrompt");
 
-  assert.match(html, /placeholder="Paste your Supadata key"/);
-  assert.match(html, /placeholder="Paste your DeepSeek key"/);
-  assert.match(html, /https:\/\/dash\.supadata\.ai\/auth\/sign-up/);
-  assert.match(html, /https:\/\/platform\.deepseek\.com\/api_keys/);
+  // Stage b1-6: the per-platform transcript-key fields are rendered into
+  // #transcriptProviders at runtime, so the placeholder text and the
+  // Supadata onboarding URL live in optionsScript's PLATFORM_COPY rather
+  // than the static options.html markup.
+  assert.match(optionsScript, /Paste your Supadata key/);
+  assert.match(optionsScript, /Paste your SESSDATA cookie/);
+  assert.match(
+    optionsScript,
+    /https:\/\/dash\.supadata\.ai\/auth\/sign-up/,
+  );
+  // The AI provider key input is still static markup — the radio list is
+  // what gets rendered into #providerOptions at runtime.
+  assert.match(html, /placeholder="Paste your AI provider key"/);
+  assert.match(
+    optionsScript,
+    /https:\/\/platform\.deepseek\.com\/api_keys/,
+  );
+  assert.match(optionsScript, /https:\/\/platform\.minimax\.io\/user-center/);
   assert.ok(html.includes(`>${englishPrompt}</textarea>`));
   assert.match(chinesePrompt, /^请把当前本地 YouTube Digest 工作区改为使用/);
   assert.notEqual(chinesePrompt, englishPrompt);

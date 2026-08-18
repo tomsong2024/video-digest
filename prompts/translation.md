@@ -41,6 +41,7 @@ The video is titled "{videoTitle}". Use the title and neighboring segments only 
 - Return a JSON object with exactly this shape: {"segments":[{"id":"unchanged-id","text":"translated text"}]}.
 - Copy every input id exactly. Translate only text values.
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+- Do NOT include any <think>...</think> blocks, internal monologue, or reasoning trace in the JSON output — emit the JSON object alone.
 ```
 
 ## Variables

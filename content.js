@@ -1,16 +1,14 @@
 /**
  * CONTENT SCRIPT
  *
- * This script runs ON the YouTube page itself. It can see and modify
- * the YouTube page DOM (the HTML elements).
+ * Runs in the ISOLATED world of the current video page. It owns the page DOM
+ * touch-points: extracting video info, injecting UI affordances (Digest /
+ * Note buttons), and listening for SPA navigation.
  *
- * It handles:
- * 1. Extracting video info (title, channel name) from the page
- * 2. Injecting "key moment" markers onto YouTube's progress bar
- * 3. Adding a "Digest" button to YouTube's action bar (next to Share/Save)
- *
- * Think of it like a robot sitting inside the YouTube tab,
- * reading the page and making small visual changes.
+ * Platform-specific selectors and navigation hooks come from the active
+ * PlatformAdapter (see platforms/adapter-base.js). On any page no adapter
+ * claims, this script no-ops so it can stay registered across all hosts in
+ * manifest.json without doing the wrong thing on the wrong site.
  */
 
 const DEBUG = false;
@@ -22,6 +20,7 @@ const debugLog = (...args) => {
 // GLOBAL STATE
 // ============================================================
 
+let activeAdapter = null;
 let ytdNoteButton = null;
 let ytdNoteButtonTimer = null;
 let ytdNoteKeyboardListenerAdded = false;
@@ -40,6 +39,12 @@ let digestButtonResizeListenerAdded = false;
  * We wait a bit for YouTube's UI to fully render.
  */
 function init() {
+  // Resolve the adapter for the current URL once. If no platform claims
+  // this page, this script has nothing to do — bail before wiring any
+  // listeners so it doesn't fight other content scripts on shared hosts.
+  activeAdapter = YTD_PLATFORMS.findByUrl(location.href);
+  if (!activeAdapter) return;
+
   // Register the global "n" keyboard shortcut once
   if (!ytdNoteKeyboardListenerAdded) {
     document.addEventListener("keydown", handleNoteKeyboardShortcut);
@@ -54,6 +59,53 @@ function init() {
   // (YouTube is an SPA, so elements appear/disappear as you navigate)
   setupButtonObserver();
   setupDigestButtonResizeListener();
+
+  // Subscribe to whichever SPA navigation event the active adapter declares.
+  // Different platforms use different signals (YouTube: "yt-navigate-finish",
+  // Bilibili: a custom event, Vimeo: nothing — falls back to URL polling).
+  // Adapter scripts load before this one via manifest.json ordering, so the
+  // adapter is already registered by the time init() runs.
+  if (typeof activeAdapter.spaNavigationEvent === "string") {
+    document.addEventListener(activeAdapter.spaNavigationEvent, spaNavHandler);
+  }
+}
+
+/**
+ * Returns true when the current URL is a watchable video page for the active
+ * adapter. SPA-friendly: re-checked on every navigation event because the
+ * adapter's matches() may go from true to false mid-session.
+ */
+function isVideoPage() {
+  return !!activeAdapter && activeAdapter.matches(location.href);
+}
+
+/**
+ * Defensive accessor for adapter-supplied CSS selectors. Returns an empty
+ * string for missing entries so querySelector() just yields null rather than
+ * throwing a syntax error in callers.
+ */
+function selector(key) {
+  return (activeAdapter && activeAdapter.playerSelectors && activeAdapter.playerSelectors[key]) || "";
+}
+
+/**
+ * Returns true when a chrome.runtime call failed because the extension
+ * context is gone — typically because the user reloaded/updated the
+ * extension at chrome://extensions while this content script was still
+ * alive on the page, or the service worker was torn down mid-session.
+ *
+ * Chrome surfaces this as an opaque "Error: Extension context invalidated."
+ * with no programmatic error code, so we pattern-match the message. The
+ * only recovery is a page refresh (so the new content script gets
+ * injected); callers should NOT treat this as a bug — it's a normal
+ * lifecycle event. Downgrading the log level from `error` to `warn` and
+ * showing a friendly "REFRESH" hint instead of a generic "ERROR" keeps
+ * the developer console clean and tells the user what to do next.
+ */
+function isExtensionContextLost(err) {
+  if (!err) return false;
+  const message = (err && err.message) || String(err);
+  return /Extension context invalidated/i.test(message);
 }
 
 /**
@@ -62,7 +114,7 @@ function init() {
  * after navigation, so a single immediate attempt can miss it.
  */
 function tryInjectNoteButton() {
-  if (!window.location.pathname.includes("/watch")) return;
+  if (!isVideoPage()) return;
 
   // Clear any existing retry so we don't stack timers
   if (ytdNoteButtonRetryTimer) {
@@ -72,12 +124,13 @@ function tryInjectNoteButton() {
 
   let attempts = 0;
   const maxAttempts = 30; // ~3 seconds of retrying
+  const playerSelector = selector("playerContainer");
 
   function attempt() {
     attempts++;
-    const playerContainer = document.querySelector(
-      "#movie_player.html5-video-player, #movie_player, .html5-video-player",
-    );
+    const playerContainer = playerSelector
+      ? document.querySelector(playerSelector)
+      : null;
 
     if (playerContainer) {
       injectNoteButton();
@@ -140,7 +193,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "getCurrentTime") {
     // Return the current video playback time (used by auto-scroll)
-    const video = document.querySelector("video.html5-main-video");
+    const videoSelector = selector("videoElement");
+    const video = videoSelector ? document.querySelector(videoSelector) : null;
     sendResponse({
       currentTime: video ? Math.floor(video.currentTime) : 0,
       paused: video ? video.paused : true,
@@ -194,36 +248,40 @@ function isVisibleDigestHost(element) {
  * querySelector() can return one of those 0x0 copies before the toolbar the
  * viewer can actually see, so inspect every candidate and resolve the native
  * button group inside the visible action row for the current video.
+ *
+ * The selector strings come from the active adapter's playerSelectors so
+ * other platforms (Bilibili / Vimeo / X) can describe their own action bars
+ * without this script knowing about them.
  */
 function findDigestButtonHost() {
+  const primarySelector = selector("actionBarRow");
+  if (!primarySelector) return null;
+
   const primaryActionRows = Array.from(
-    document.querySelectorAll("ytd-watch-metadata #actions-inner"),
+    document.querySelectorAll(primarySelector),
   );
 
   for (const actionRow of primaryActionRows) {
     if (!isVisibleDigestHost(actionRow)) continue;
 
-    const visibleButtonGroup = Array.from(
-      actionRow.querySelectorAll("#top-level-buttons-computed"),
-    ).find(isVisibleDigestHost);
+    const groupSelector = selector("actionBarGroup");
+    const visibleButtonGroup = groupSelector
+      ? Array.from(actionRow.querySelectorAll(groupSelector)).find(
+          isVisibleDigestHost,
+        )
+      : null;
     if (visibleButtonGroup) return visibleButtonGroup;
   }
 
+  const fallbackSelector = selector("actionBarFallback");
+  if (!fallbackSelector) return null;
   const fallbackCandidates = Array.from(
-    document.querySelectorAll(
-      "ytd-watch-metadata #actions #top-level-buttons-computed, " +
-        "ytd-watch-metadata #top-level-buttons-computed, " +
-        "#primary #actions #top-level-buttons-computed",
-    ),
+    document.querySelectorAll(fallbackSelector),
   );
 
   return (
-    fallbackCandidates.find(
-      (candidate) =>
-        isVisibleDigestHost(candidate) &&
-        (candidate.closest("ytd-watch-metadata") ||
-          candidate.closest("#primary")),
-    ) || null
+    fallbackCandidates.find((candidate) => isVisibleDigestHost(candidate)) ||
+    null
   );
 }
 
@@ -289,6 +347,14 @@ function createDigestButton() {
       });
       debugLog("[YouTube Digest] openSidePanel response:", result);
     } catch (err) {
+      if (isExtensionContextLost(err)) {
+        // Expected after a manual extension reload/update — page
+        // refresh fixes it. Don't pollute the console with an error.
+        console.warn(
+          "[YouTube Digest] Extension context invalidated; refresh the page so the side panel can open.",
+        );
+        return;
+      }
       console.error("[YouTube Digest] Failed to open side panel:", err);
     }
   });
@@ -307,7 +373,7 @@ function injectDigestButton() {
     document.querySelectorAll("#ytd-digest-button"),
   );
 
-  if (!window.location.pathname.includes("/watch")) {
+  if (!isVideoPage()) {
     existingButtons.forEach((button) => button.remove());
     ytdDigestButton = null;
     return false;
@@ -374,7 +440,7 @@ function setupButtonObserver() {
 
   digestButtonObserver = new MutationObserver(() => {
     // Check if we need to inject the buttons
-    if (window.location.pathname.includes("/watch")) {
+    if (isVideoPage()) {
       scheduleDigestButtonReconciliation();
       if (!ytdNoteButton || !ytdNoteButton.isConnected) {
         tryInjectNoteButton();
@@ -400,7 +466,7 @@ function setupButtonObserver() {
  */
 function injectNoteButton() {
   // Don't inject if we're not on a video page
-  if (!window.location.pathname.includes("/watch")) return;
+  if (!isVideoPage()) return;
 
   // Don't inject if button already exists and is properly tracked.
   // If a stale button exists (e.g., from a previous content-script instance),
@@ -413,13 +479,12 @@ function injectNoteButton() {
     existingButton.remove();
   }
 
-  // Find the video player container. YouTube rebuilds this dynamically, so
-  // we try the most common selectors.
-  const playerContainer = document.querySelector(
-    "#movie_player.html5-video-player, " +
-      "#movie_player, " +
-      ".html5-video-player",
-  );
+  // Find the video player container. Most platforms rebuild this dynamically,
+  // so we delegate the selector list to the active adapter.
+  const playerSelector = selector("playerContainer");
+  const playerContainer = playerSelector
+    ? document.querySelector(playerSelector)
+    : null;
 
   if (!playerContainer) {
     debugLog(
@@ -544,7 +609,7 @@ function resetNoteButtonTimer() {
  * in an input field.
  */
 function handleNoteKeyboardShortcut(e) {
-  if (!window.location.pathname.includes("/watch")) return;
+  if (!isVideoPage()) return;
   if (e.key !== "n" && e.key !== "N") return;
 
   // Ignore if the user is typing in an input/textarea/contenteditable
@@ -574,7 +639,8 @@ function handleNoteKeyboardShortcut(e) {
 async function saveCurrentNote() {
   debugLog("[YouTube Digest] Saving note");
 
-  const video = document.querySelector("video.html5-main-video");
+  const videoSelector = selector("videoElement");
+  const video = videoSelector ? document.querySelector(videoSelector) : null;
   if (!video) {
     console.error("[YouTube Digest] No video element found");
     return;
@@ -583,7 +649,7 @@ async function saveCurrentNote() {
   // Go back 3 seconds to capture what was just said (user reacts after hearing it)
   const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
   const videoInfo = extractVideoInfo();
-  const videoId = new URLSearchParams(window.location.search).get("v");
+  const videoId = activeAdapter ? activeAdapter.extractVideoId(location.href) : null;
 
   const noteButton = ytdNoteButton;
   const originalContent = noteButton ? noteButton.innerHTML : "";
@@ -621,6 +687,21 @@ async function saveCurrentNote() {
     if (noteButton) {
       noteButton.innerHTML =
         '<span style="letter-spacing: 0.2px;">ERROR</span>';
+    }
+    if (isExtensionContextLost(err)) {
+      // The extension was reloaded/updated/disabled while this content
+      // script was still running — its chrome.runtime.* calls now fail.
+      // Demote to warn and surface a "REFRESH" hint on the button so
+      // the user knows the next click will work after a page reload.
+      console.warn(
+        "[YouTube Digest] Extension context invalidated; refresh the page to save notes again.",
+      );
+      if (noteButton) {
+        noteButton.innerHTML =
+          '<span style="letter-spacing: 0.2px;">REFRESH</span>';
+        noteButton.style.background = "#7c8b6f";
+      }
+      return;
     }
     console.error("[YouTube Digest] Save note exception:", err);
   }
@@ -703,30 +784,32 @@ function showNoteSavedToast(note) {
 // ============================================================
 
 /**
- * Reads the video title, channel name, and description directly from YouTube's page.
- * These are just sitting in the HTML — we grab them from the DOM elements.
+ * Reads the video title, channel name, and description directly from the
+ * page DOM. Selector strings come from the active adapter so each platform
+ * can describe its own markup. Falls back to empty strings rather than
+ * throwing when selectors are missing — callers tolerate missing fields.
  */
 function extractVideoInfo() {
-  // The video title is in an h1 element inside the #title container
-  const titleElement = document.querySelector(
-    "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
-  );
+  const titleSelector = selector("titleElement");
+  const channelSelector = selector("channelElement");
+  const descriptionSelector = selector("descriptionElement");
+  const videoSelector = selector("videoElement");
 
-  // The channel name is in the channel info section
-  const channelElement = document.querySelector(
-    "#channel-name yt-formatted-string a, ytd-channel-name yt-formatted-string a",
-  );
+  const titleElement = titleSelector
+    ? document.querySelector(titleSelector)
+    : null;
 
-  // Video duration from the video element
-  const videoElement = document.querySelector("video.html5-main-video");
+  const channelElement = channelSelector
+    ? document.querySelector(channelSelector)
+    : null;
 
-  // Video description — YouTube has this in a few possible places
-  const descriptionElement = document.querySelector(
-    "#description-inner, " +
-      "ytd-watch-metadata #description yt-attributed-string, " +
-      "#description yt-formatted-string, " +
-      "ytd-expander#description yt-attributed-string",
-  );
+  const videoElement = videoSelector
+    ? document.querySelector(videoSelector)
+    : null;
+
+  const descriptionElement = descriptionSelector
+    ? document.querySelector(descriptionSelector)
+    : null;
 
   return {
     title: titleElement?.textContent?.trim() || "",
@@ -770,7 +853,8 @@ function highlightKeyMoments(moments, videoDuration) {
  * which is the standard HTML5 way to seek in a video.
  */
 function seekToTimestamp(seconds) {
-  const video = document.querySelector("video.html5-main-video");
+  const videoSelector = selector("videoElement");
+  const video = videoSelector ? document.querySelector(videoSelector) : null;
   if (!video) {
     console.error("[YouTube Digest Content] No video element found for seek");
     return;
@@ -795,16 +879,30 @@ function escapeHtmlForContent(text) {
 // ============================================================
 
 /**
- * YouTube is a "Single Page Application" (SPA). This means when you
- * click on a new video, the page doesn't fully reload — YouTube
- * dynamically swaps out the content. So our content script stays alive
- * but needs to detect when the video changes.
+ * Most video sites are SPAs — navigating between videos doesn't fully
+ * reload the page, so we listen for the adapter-declared navigation event
+ * (e.g. YouTube's "yt-navigate-finish") and reset the UI between videos.
  *
- * We watch for URL changes using the `yt-navigate-finish` event,
- * which YouTube fires after navigation completes. When that happens,
- * we clean up old markers and re-inject the button.
+ * Declared as a function (not const) so init() can reference it on the very
+ * first call even when readyState is already "interactive" or "complete" and
+ * init() runs synchronously before this declaration would otherwise be
+ * reached. Function declarations are hoisted, const arrow bindings are not.
  */
-document.addEventListener("yt-navigate-finish", () => {
+function spaNavHandler() {
+  // Re-resolve the adapter for the new URL. If the page navigated to a
+  // non-video URL, clear activeAdapter so subsequent no-ops are cheap.
+  activeAdapter = YTD_PLATFORMS.findByUrl(location.href);
+  if (!activeAdapter) {
+    document
+      .querySelectorAll("#ytd-digest-button")
+      .forEach((button) => button.remove());
+    ytdDigestButton = null;
+    const strayNote = document.getElementById("ytd-note-button");
+    if (strayNote) strayNote.remove();
+    ytdNoteButton = null;
+    return;
+  }
+
   // Clean up old key moment markers when navigating to a new video
   const existingMarkers = document.querySelectorAll(".ytd-key-moment-markers");
   existingMarkers.forEach((m) => m.remove());
@@ -835,9 +933,17 @@ document.addEventListener("yt-navigate-finish", () => {
   const existingToast = document.getElementById("ytd-note-toast");
   if (existingToast) existingToast.remove();
 
-  // Re-inject buttons for the new video (with a small delay for YouTube to render)
+  // Re-inject buttons for the new video (with a small delay for the page
+  // to render). The adapter's matches() decides whether we're still on a
+  // watchable page; non-video URLs are filtered by init() on the next run.
   setTimeout(() => {
+    if (!isVideoPage()) return;
     scheduleDigestButtonReconciliation(0);
     tryInjectNoteButton();
   }, 500);
-});
+};
+
+// (The SPA listener is registered inside init() above, after activeAdapter
+// is resolved. We don't register anything at the top level — adapter scripts
+// run earlier than this file via manifest.json ordering, but activeAdapter is
+// only set after the init() call below.)

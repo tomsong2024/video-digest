@@ -45,49 +45,32 @@
 
       <form id="settingsForm">
         <section class="card">
-          <h2 data-i18n="transcriptProvider">Transcript provider</h2>
-          <label for="supadataApiKey" data-i18n="supadataApiKeyLabel"
-            >Supadata API key</label
-          >
-          <input
-            id="supadataApiKey"
-            name="supadataApiKey"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="Paste your Supadata key"
-          />
-          <p class="help">
-            <span data-i18n="supadataHelp"
-              >Used to fetch timestamped YouTube subtitles.</span
-            >
-            <a
-              href="https://dash.supadata.ai/auth/sign-up"
-              target="_blank"
-              rel="noreferrer"
-              data-i18n="supadataLink"
-              >Create a Supadata account and key</a
-            ><span data-i18n="supadataHelpSuffix"
-              >. Supadata generates the key during onboarding.</span
-            >
+          <h2 data-i18n="transcriptProvider">Transcript providers</h2>
+          <p class="lede" data-i18n="transcriptProviderLede">
+            Add the credentials for each video platform you want to use.
+            YouTube uses a Supadata key; Bilibili uses your SESSDATA cookie.
+            You only need to configure the platforms you visit.
           </p>
+          <!-- Stage b1-6: per-platform sub-sections are rendered by
+               options.js at runtime from YTD_PLATFORMS.list() and
+               PLATFORM_COPY so adding a new platform adapter surfaces
+               a new key field without editing this markup. -->
+          <div id="transcriptProviders" class="transcript-providers"></div>
         </section>
 
         <section class="card">
           <h2 data-i18n="aiProvider">AI provider</h2>
-          <div
-            class="provider-summary"
+          <fieldset
+            class="provider-options"
+            id="providerOptions"
             aria-label="Supported AI provider"
             data-i18n-aria-label="providerSummaryLabel"
           >
-            <span class="provider-name">DeepSeek V4 Flash</span>
-            <span class="provider-badge" data-i18n="providerBadge"
-              >Supported in this version</span
-            >
-          </div>
+            <!-- Provider radios are rendered by options.js at runtime. -->
+          </fieldset>
 
-          <label for="aiApiKey" data-i18n="deepseekApiKeyLabel"
-            >DeepSeek API key</label
+          <label for="aiApiKey" id="aiApiKeyLabel" data-i18n="aiApiKeyLabel"
+            >AI provider key</label
           >
           <input
             id="aiApiKey"
@@ -95,26 +78,52 @@
             type="password"
             autocomplete="off"
             spellcheck="false"
-            placeholder="Paste your DeepSeek key"
+            placeholder="Paste your AI provider key"
           />
           <p class="help">
-            <span data-i18n="deepseekHelp"
-              >YouTube Digest uses DeepSeek V4 Flash for overviews,
+            <span id="aiProviderHelp" data-i18n="aiProviderHelp"
+              >YouTube Digest uses the selected AI provider for overviews,
               explanations, translation, and note polishing.</span
             >
             <a
-              href="https://platform.deepseek.com/api_keys"
+              id="aiProviderLink"
+              href="#"
               target="_blank"
               rel="noreferrer"
-              data-i18n="deepseekLink"
-              >Create a DeepSeek API key</a
-            ><span data-i18n="deepseekHelpSuffix">.</span>
+              data-i18n="aiProviderLink"
+              >Create an account and key</a
+            ><span id="aiProviderHelpSuffix" data-i18n="aiProviderHelpSuffix"
+              >.</span
+            >
           </p>
-          <div class="privacy-note" data-i18n="privacyNote">
-            When you use AI features, DeepSeek receives the video transcript
-            and relevant video context. Review DeepSeek's terms and pricing
-            before saving.
+          <div class="privacy-note" id="aiPrivacyNote" data-i18n="privacyNote">
+            When you use AI features, the selected provider receives the video
+            transcript and relevant video context. Review the provider's terms
+            and pricing before saving.
           </div>
+
+          <!-- Stage t05 (AI punctuation): opt-out switch that lets users on
+               tight AI quotas disable the per-digest punctuation pass. The
+               checkbox round-trips through settings.aiPunctuationEnabled in
+               settings.js so a saved value reaches background.js verbatim. -->
+          <label class="ai-punctuation-toggle" for="aiPunctuationEnabled">
+            <input
+              id="aiPunctuationEnabled"
+              name="aiPunctuationEnabled"
+              type="checkbox"
+              checked
+            />
+            <span data-i18n="aiPunctuationLabel"
+              >AI add punctuation to Chinese transcripts</span
+            >
+          </label>
+          <p
+            class="help ai-punctuation-help"
+            data-i18n="aiPunctuationDescription"
+          >
+            Each digest uses one extra AI call. Disable to fall back to the
+            local heuristic.
+          </p>
         </section>
 
         <div class="form-actions">

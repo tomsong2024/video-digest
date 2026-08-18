@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Turn every YouTube video into a resource for deep learning. YouTube Digest brings transcripts, bilingual translation, AI overviews, explanations, and timestamped notes into one Chrome side panel, so you can study ideas and language without losing your place.
+Turn YouTube and Bilibili videos into resources for deep learning. YouTube Digest brings transcripts, bilingual translation, AI overviews, explanations, and timestamped notes into one Chrome side panel, so you can study ideas and language without losing your place.
 
 - Turn captions into a readable, searchable learning resource.
 - Learn languages with the original transcript, a Simplified Chinese translation, or an aligned bilingual view.
@@ -22,7 +22,7 @@ You do not need to understand the code or use the command line. Send this messag
 Your agent should:
 
 1. Ask where you want to keep the project, download or clone it there, and tell you the exact full path. If you want a suggestion, it can offer `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows.
-2. Open the official Supadata and DeepSeek pages below and help you create your own accounts.
+2. Open the official Supadata page below and the AI provider page you plan to use (MiniMax or DeepSeek) and help you create your own accounts.
 3. Walk you through selecting the exact project folder you chose in Chrome with **Load unpacked**.
 4. Show you where to enter your API keys in the extension's **Settings** page.
 5. Open a YouTube video with captions and confirm the transcript and translation work.
@@ -48,10 +48,10 @@ Because this is an unpacked extension, it does not update automatically. After d
 
 ## Set up your API keys
 
-YouTube Digest needs two keys under your own provider accounts:
+YouTube Digest needs one AI key and at least one transcript-provider credential under your own accounts:
 
-1. A **Supadata API key** to retrieve YouTube transcripts.
-2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
+1. A **transcript-provider credential** for the platforms you want to use. YouTube needs a **Supadata API key**. Bilibili needs your own **SESSDATA cookie** unless the video has public CC subtitles. Configure only the platforms you visit, and the side panel prompts you when a video needs a key you have not added.
+2. An **AI provider key** for overviews, explanations, translation, and automatic note polishing. YouTube Digest ships with MiniMax M3 selected by default and lets you switch to DeepSeek V4 Flash in Settings. Pick whichever provider you prefer. The interface and behavior are identical.
 
 ### Get a Supadata API key
 
@@ -63,33 +63,72 @@ YouTube Digest needs two keys under your own provider accounts:
 
 See the [official Supadata documentation](https://docs.supadata.ai/) if the dashboard flow changes.
 
-### Get a DeepSeek API key
+### Get your Bilibili SESSDATA cookie
+
+YouTube Digest uses Bilibili's official player API (`api.bilibili.com/x/player/v2`) to fetch subtitles. Public CC-subtitled videos work without any login. Login-required videos (membership content, premium-only subtitles) need your personal SESSDATA cookie.
+
+To copy your SESSDATA:
+
+1. Sign in to [bilibili.com](https://www.bilibili.com) in Chrome.
+2. Open **Developer Tools** with `F12` (or `Cmd+Option+I` on macOS).
+3. Switch to the **Application** tab. If the tab is hidden, click the `>>` overflow and pick **Application**.
+4. In the left sidebar, expand **Cookies** and select `https://www.bilibili.com`.
+5. Find the row named `SESSDATA`, double-click its **Value** cell, and copy the value.
+6. Paste it into **Bilibili SESSDATA cookie** in YouTube Digest Settings.
+
+Quick alternative from the browser console (Application tab → Console):
+
+```js
+document.cookie.match(/SESSDATA=([^;]+)/)?.[1]
+```
+
+The console prints just the cookie value, ready to paste. The cookie is stored only in your local Chrome extension storage. YouTube Digest never sends it anywhere except to Bilibili's own player API. Logging out of Bilibili invalidates the cookie; rotate it any time from the same DevTools panel.
+
+av-numbered videos (e.g. `https://www.bilibili.com/video/av170001`) are not yet supported. Open the BV version of the URL on Bilibili and use that instead.
+
+### Get a MiniMax M3 API key (default AI provider)
+
+1. Open the official [MiniMax key page](https://platform.minimax.io/user-center/basic-information/interface-key).
+2. Sign in or create a MiniMax account when prompted.
+3. Choose **Create new key**, give it a recognizable name such as `YouTube Digest`, and create it.
+4. Copy the key immediately. The full key may only be shown once.
+5. Paste it into **AI provider key** in YouTube Digest Settings (the field label changes to match whichever provider you selected).
+6. If MiniMax reports insufficient balance, top up the MiniMax account and try again.
+
+See the [official MiniMax API documentation](https://platform.minimax.io/) for current account and API details.
+
+### Get a DeepSeek API key (optional alternative)
 
 1. Open the official [DeepSeek API Keys page](https://platform.deepseek.com/api_keys).
 2. Sign in or create a DeepSeek Platform account when prompted.
 3. Choose **Create new API key**, give it a recognizable name such as `YouTube Digest`, and create it.
 4. Copy the key immediately. The full key may only be shown once.
-5. Paste it into **DeepSeek API key** in YouTube Digest Settings.
+5. Switch the AI provider radio in YouTube Digest Settings to **DeepSeek V4 Flash**, then paste the key into **AI provider key**.
 6. If DeepSeek reports insufficient balance, add credit in your DeepSeek Platform account and try again.
 
 See the [official DeepSeek API documentation](https://api-docs.deepseek.com/) for current account and API details.
 
 Open **Settings** from the side panel. You can also open the YouTube Digest **Options** page from its card at `chrome://extensions` or by right-clicking its toolbar icon. Paste keys only into these Settings fields. Never paste a key into an AI chat, repository file, screenshot, or public message.
 
-The published version supports DeepSeek V4 Flash as its only AI provider:
+The published version supports MiniMax M3 by default and DeepSeek V4 Flash as an optional alternative. The endpoint and model are fixed for each provider, so the only AI credential you enter is your API key for the selected provider:
 
 ```text
+Default provider: MiniMax M3
+Base URL: https://api.minimaxi.com/v1
+Model: MiniMax-M3
+
+Optional alternative: DeepSeek V4 Flash
 Base URL: https://api.deepseek.com
 Model: deepseek-v4-flash
 ```
 
-YouTube Digest sends every DeepSeek request in non-thinking mode for responsive, predictable interactions. The endpoint and model are fixed in Settings, so the only AI credential you enter is your DeepSeek API key. To use another provider or model, copy the safe customization prompt in Settings and give it to a coding agent for your local copy. Never add an API key to that prompt or chat.
+YouTube Digest sends every AI request in non-thinking mode for responsive, predictable interactions. Pick the provider you want from the radio list in Settings, then paste the matching API key. To use another provider or model, copy the safe customization prompt in Settings and give it to a coding agent for your local copy. Never add an API key to that prompt or chat.
 
 Keys and settings are stored in Chrome's local extension storage on your device. Release builds do not include or use `config.js`.
 
 ## Use YouTube Digest
 
-1. Open a standard YouTube watch page with captions.
+1. Open a standard YouTube watch page with captions, or a standard Bilibili `/video/BV...` page with subtitles.
 2. Click the YouTube Digest extension icon to open the side panel.
 3. Read the timestamped transcript, or choose **Original**, **中文**, or **双语**.
 4. Open **Overview** when you want AI-generated chapters and key quotes.
@@ -100,11 +139,12 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
+- Standard `bilibili.com/video/BV...` pages with native Bilibili subtitles. Public CC-subtitled videos work without a SESSDATA cookie; cookie-gated videos need your own SESSDATA in Settings.
 - Native subtitle tracks returned by Supadata. YouTube Digest prefers English when available, but may show another native language.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
-- AI overviews, selected-text explanations, translation, and automatic note polishing.
+- AI overviews, selected-text explanations, translation, automatic note polishing, and punctuation restoration for unpunctuated Chinese transcripts.
 - Local notes and a local cache for recent transcript and digest results.
-- DeepSeek V4 Flash for all published AI features. Other providers require a local code adaptation and are not supported by this published version.
+- MiniMax M3 (default) and DeepSeek V4 Flash (optional) for all published AI features. Pick your provider in Settings. Other providers or models require a local code adaptation and are not supported by this published version.
 
 Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
@@ -140,6 +180,21 @@ If all input is billed as cache miss, input costs about $0.0046 and output costs
 
 Translation is lazy and progressive. Cached segments are reused, and only rows you request by scrolling into them incur calls. Retries, provider behavior, and pricing changes can increase the final cost.
 
+## AI punctuation restore: cost and fallback
+
+Bilibili's automatic AI captions often arrive as one long string of Chinese characters with no punctuation at all, which is exhausting to read. Starting August 2026, every digest sends the fetched transcript to the active AI provider once for a punctuation-restore pass: the model only inserts Chinese punctuation (，。！？), never changes words, order, or `[M:SS]` timestamps. The punctuated version shows up in the `TRANSCRIPT:` block of the exported `.txt`, the side panel's Original tab, and any note or explanation; the video description is left untouched.
+
+The restore call reuses the same AI request path as the Overview / explanation / translation features. A single request typically takes 3–8 seconds, and the token cost is far smaller than a translation pass (a typical digest uses 2,000–8,000 input tokens and 1,000–3,000 output tokens). See the DeepSeek pricing page above and your provider account for the live numbers.
+
+Fallback behavior: whenever any of the following happens, YouTube Digest silently falls back to the existing local heuristic so the UI never stalls, errors out, or blocks an export.
+
+- No AI key configured (`NO_AI_KEY`).
+- The "AI add punctuation" toggle is off (`DISABLED`, see below).
+- The provider returns 429 / 5xx, times out, returns empty content, or returns a clearly truncated result (`AI_RATE_LIMITED` or `IMPLAUSIBLE_OUTPUT`).
+- The transcript already contains CJK punctuation (`already_punctuated`); the call is skipped entirely and the existing punctuation is kept.
+
+How to disable it: open **Settings** in the side panel or the extension's **Options** page, then uncheck **AI add punctuation to Chinese transcripts** under the AI provider section. With it off, every digest skips the AI call and the UI / export show the local-heuristic-comma version directly. The box is checked by default; flip it back on any time on the same device.
+
 ## Remix it with your coding agent
 
 This is a personal remix project. Upstream issues and pull requests are not accepted. If something breaks or you want a new feature, download or fork your own copy and ask your coding agent to fix, remix, or personalize it for you.
@@ -163,9 +218,10 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 YouTube Digest makes provider requests directly from the extension:
 
 1. It sends a canonical YouTube watch URL to Supadata to request the native transcript.
-2. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
-3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
-4. It stores keys, settings, notes, and recent cache entries locally in Chrome.
+2. For Bilibili videos, it sends the canonical `/video/BV...` URL to `api.bilibili.com/x/web-interface/view` and `/x/player/v2`, attaching your SESSDATA cookie as authentication when one is configured.
+3. It sends the transcript and relevant video metadata to MiniMax or DeepSeek (whichever provider you picked) when you request AI features.
+4. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
+5. It stores keys, settings, notes, and recent cache entries locally in Chrome.
 
 There is no YouTube Digest account system, advertising, analytics, or telemetry. Supadata and DeepSeek still receive data under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
 
@@ -200,12 +256,34 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 
 YouTube Digest will not fall back to generated transcription.
 
+### No transcript is found on a Bilibili video
+
+- Confirm the video has native subtitles on Bilibili itself (click CC on the web player).
+- Public CC-subtitled videos should work without any SESSDATA. If they don't, sign in to Bilibili and add your SESSDATA in Settings.
+- av-numbered URLs are not yet supported. Open the BV version of the URL on Bilibili and use that instead.
+- A `BILIBILI_VIEW_ERROR` or `BILIBILI_PLAYER_ERROR` usually means the Bilibili API rejected your SESSDATA, the cookie expired, or the video is region-restricted. Refresh your SESSDATA from DevTools and try again.
+- If you keep seeing `NO_BILIBILI_COOKIE`, open Settings and confirm the SESSDATA field was saved.
+
+### The Digest button is missing on a Bilibili video
+
+- At `chrome://extensions`, find YouTube Digest and click **Reload**, then refresh the Bilibili tab.
+- Confirm that you are on `https://www.bilibili.com/video/BV...` (or `/video/av...`), not a bangumi episode (`/bangumi/play/...`) or the homepage.
+- The current version targets the Bilibili public web layout. The toolbar may not appear if Bilibili ships a redesign that changes the action bar; ask your coding agent to inspect the content script on that exact video page.
+
 ### AI requests fail
 
 - A `401` or `403` usually means the DeepSeek key or account access is invalid.
 - A `429` usually means a DeepSeek rate or spending limit was reached.
 - Confirm the key was created in the DeepSeek Platform account linked above and that the account has available credit.
 - If you adapted a local copy for another model, use the Settings customization prompt again and ask your coding agent to inspect that local implementation.
+- `AI_RATE_LIMITED` only comes from the punctuation restore call. YouTube Digest falls back to the local heuristic and shows no error; to skip the punctuation call entirely, uncheck **AI add punctuation** in Settings.
+
+### AI punctuation restore is off or seems to do nothing
+
+- The **AI add punctuation to Chinese transcripts** checkbox in Settings must stay checked (it is checked by default). Unchecking it skips the AI punctuation call on every digest.
+- An AI failure does not show in the UI; the transcript silently falls back to the local heuristic. To confirm the AI call actually ran, open the extension's Service Worker console and look for the `Punctuation batch` debug log.
+- Long transcripts are automatically split into batches at `[M:SS]` boundaries; each batch calls the AI independently and the results are stitched together. The side panel shows the original unpunctuated text until the whole transcript finishes punctuation restoration, then re-renders.
+- A transcript that already contains CJK punctuation (typical of YouTube official captions or public CC subtitles) is detected as `already_punctuated` and the AI call is skipped; the punctuation you see is whatever the source provider already supplied.
 
 Never share API keys, private transcripts, or personal notes in chats, screenshots, or logs.
 

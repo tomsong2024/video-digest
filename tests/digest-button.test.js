@@ -9,6 +9,23 @@ const contentScript = fs.readFileSync(
   "utf8",
 );
 
+// Adapter scripts must load into the vm context BEFORE content.js so the
+// YTD_PLATFORMS registry is populated when init() runs. This mirrors the
+// real extension's manifest content_scripts ordering.
+const adapterBaseScript = fs.readFileSync(
+  path.resolve(__dirname, "..", "platforms", "adapter-base.js"),
+  "utf8",
+);
+const youtubeAdapterScript = fs.readFileSync(
+  path.resolve(__dirname, "..", "platforms", "youtube.js"),
+  "utf8",
+);
+
+// Watch URL the fake window.location will resolve to. The adapter's
+// matches() / extractVideoId() run against this full URL, not just the
+// pathname, so the test has to provide a real href.
+const FAKE_WATCH_URL = "https://www.youtube.com/watch?v=ydTeb_I0b94";
+
 class FakeElement {
   constructor({
     id = "",
@@ -47,9 +64,14 @@ class FakeElement {
     const matches = [];
 
     for (const child of this.children) {
+      // The fake only models the #top-level-buttons-computed button group
+      // used in these tests. Match by id regardless of any ancestor selector
+      // prefix so adapter-supplied selectors like
+      // "ytd-watch-metadata #actions-inner #top-level-buttons-computed"
+      // resolve correctly when nested queries descend into an action row.
       if (
-        selector === "#top-level-buttons-computed" &&
-        child.id === selector.slice(1)
+        selector.includes("top-level-buttons-computed") &&
+        child.id === "top-level-buttons-computed"
       ) {
         matches.push(child);
       }
@@ -107,7 +129,9 @@ function createHarness() {
   let nextTimerId = 1;
 
   const document = {
-    readyState: "loading",
+    // "complete" makes content.js call init() synchronously instead of waiting
+    // for a DOMContentLoaded event the test never fires.
+    readyState: "complete",
     body: new FakeElement(),
     addEventListener(type, listener) {
       documentListeners[type] = listener;
@@ -135,11 +159,29 @@ function createHarness() {
     },
   };
 
+  // Single object referenced both as the top-level `location` global and as
+  // `window.location`. In real browsers `location === window.location`; vm
+  // contexts don't auto-alias, so we share the underlying object.
+  const locationStub = {
+    href: FAKE_WATCH_URL,
+    pathname: "/watch",
+    hostname: "www.youtube.com",
+  };
+
   const context = vm.createContext({
     console,
     document,
+    // Browsers expose `location` as a top-level global; vm contexts don't, so
+    // we mirror the browser layout. content.js reads location.href directly.
+    location: locationStub,
+    // Node's vm context doesn't auto-populate WHATWG globals; supply the
+    // ones the adapter scripts + content.js touch synchronously.
+    URL,
+    URLSearchParams,
     window: {
-      location: { pathname: "/watch" },
+      // Full URL is required: YTD_PLATFORMS.findByUrl() calls
+      // new URL(location.href), so a stub with only pathname is not enough.
+      location: locationStub,
       addEventListener(type, listener) {
         windowListeners[type] = listener;
       },
@@ -179,6 +221,10 @@ function createHarness() {
     clearInterval() {},
   });
 
+  // Load adapter scripts first so YTD_PLATFORMS is populated when content.js
+  // runs. Each script IIFEs its registration; order matches manifest.json.
+  vm.runInContext(adapterBaseScript, context);
+  vm.runInContext(youtubeAdapterScript, context);
   vm.runInContext(contentScript, context);
 
   return {

@@ -26,7 +26,8 @@ let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
 let isAnalysisLoading = false; // Track if analysis is in progress
-let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
+let activeTabId = null; // Tab ID that any registered platform adapter recognises
+let activeAdapter = null; // Adapter that owns the currently loaded video
 let errorAction = null;
 
 // --- Translation state ---
@@ -80,6 +81,168 @@ function sendTranslationMessage(message) {
   });
 }
 
+/**
+ * Asks the background service worker to insert Chinese sentence punctuation
+ * into a transcript that arrived without any. Same channel-bounded pattern
+ * as sendTranslationMessage but with a shorter timeout — punctuation is
+ * non-blocking (the UI has already rendered with the raw text) so failing
+ * fast is better than waiting 130s.
+ *
+ * The side panel always passes the *timestamped* transcript (each entry is
+ * prefixed with `[M:SS]`) so the AI can preserve line boundaries and the
+ * result can be split back into per-entry `text` values for the existing
+ * `groupTranscriptEntries` pipeline.
+ *
+ * Returns `{ timestampedText, plainText }` on success, or `null` on any
+ * failure. A `null` result signals to the caller that the local heuristic
+ * fallback (already wired into normalizeCaptionText) should keep the
+ * result.
+ */
+async function requestAiPunctuation(timestampedText, videoTitle) {
+  if (typeof timestampedText !== "string" || !timestampedText.trim()) {
+    return null;
+  }
+  // Skip already-punctuated text so the call is idempotent and cheap — the
+  // local heuristic and the upstream normalizeCaptionText pass also short-
+  // circuit here, so the round-trip would just echo the same text back.
+  if (/[\u3000-\u303f\uff00-\uffef]/.test(timestampedText)) {
+    return null;
+  }
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error("AI punctuation request timed out")),
+      60_000,
+    );
+  });
+  let response;
+  try {
+    response = await Promise.race([
+      chrome.runtime.sendMessage({
+        action: "punctuateTranscript",
+        transcriptText: timestampedText,
+        videoTitle: videoTitle || "",
+      }),
+      timeoutPromise,
+    ]);
+  } catch (error) {
+    console.warn("[YouTube Digest] AI punctuation fallback:", error.message);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  // Background returns `{ success, timestampedText, plainText }` on success
+  // or `{ success: false, skipped, error }` on graceful failure (no key,
+  // disabled, already punctuated, quota exceeded, etc.). The `skipped`
+  // branch must come first because a successful-looking `skipped` payload
+  // also carries no `timestampedText` / `plainText` strings — checking it
+  // after `success` would silently fall through to the warn-and-return-null
+  // path even though the upstream short-circuit already returned a sentinel.
+  if (response && response.skipped === "already_punctuated") {
+    return null;
+  }
+  if (
+    response &&
+    response.success &&
+    typeof response.timestampedText === "string" &&
+    typeof response.plainText === "string"
+  ) {
+    return {
+      timestampedText: response.timestampedText,
+      plainText: response.plainText,
+    };
+  }
+  // Any failure (NO_AI_KEY / DISABLED / 429 / IMPLAUSIBLE_OUTPUT / ...) lets
+  // the local heuristic handle it. Logged as warn, not error — it's a
+  // graceful degradation, not a bug.
+  if (response && response.error) {
+    console.warn(
+      "[YouTube Digest] AI punctuation fallback:",
+      response.error,
+    );
+  }
+  return null;
+}
+
+/**
+ * Replaces the raw transcript text / entries with the AI-punctuated
+ * versions and re-renders the UI so the user sees the punctuated text
+ * without having to switch tabs. The function is a no-op when the AI pass
+ * failed (already silently logged) or the line count drifted (which would
+ * mean the AI dropped or merged timestamped lines).
+ */
+function applyAiPunctuationResult(result, videoId) {
+  // The wrapper already filters null / failure responses, but tests and
+  // future call sites are easier to reason about when this function is a
+  // total no-op against any garbage input rather than crashing on the
+  // first destructured property.
+  if (!result || typeof result !== "object") return;
+  const { timestampedText, plainText } = result;
+  if (
+    !timestampedText ||
+    typeof timestampedText !== "string" ||
+    !plainText ||
+    typeof plainText !== "string"
+  ) {
+    return;
+  }
+  if (videoId && currentVideoId && videoId !== currentVideoId) return;
+
+  currentTranscriptText = plainText;
+  currentTranscriptTimestamped = timestampedText;
+
+  if (Array.isArray(currentTranscript)) {
+    // Realign per-entry `text` values to the punctuated timestamped text so
+    // groupTranscriptEntries reads from punctuation-aware segments. We trust
+    // the AI to have kept line counts and order intact (the prompt enforces
+    // this), so a straight `[M:SS]` split + index lookup is sufficient.
+    const rebuilt = [];
+    const lines = timestampedText.split(/\n/);
+    let cursor = 0;
+    currentTranscript.forEach((entry) => {
+      const stampMatch = String(entry?.text || "").match(/^\s*\[(\d+):(\d{2})\]\s*/);
+      const stamp = stampMatch ? `[${stampMatch[1]}:${stampMatch[2]}] ` : "";
+      let assigned = "";
+      for (let i = cursor; i < lines.length; i += 1) {
+        const line = String(lines[i] || "").trim();
+        if (line) {
+          assigned = line;
+          cursor = i + 1;
+          break;
+        }
+      }
+      // The AI output re-emits the [M:SS] stamp on every line. The
+      // entry's stamp is the authoritative one (it ties this row to
+      // the original timeline), so strip any leading stamp from
+      // `assigned` first; otherwise concatenation produces
+      // `[0:01] [0:01] 你好，世界。`. If the AI dropped the stamp,
+      // `assignedNoStamp` still gives us the body and `stamp` puts
+      // it back. An empty `assigned` keeps the original entry text
+      // as a safe fallback so we never ship an empty row.
+      const assignedNoStamp = assigned.replace(/^\s*\[\d+:\d{2}\]\s*/, "");
+      rebuilt.push({
+        ...entry,
+        text: assigned
+          ? `${stamp}${assignedNoStamp}` || assigned
+          : entry.text,
+      });
+    });
+    if (
+      rebuilt.length === currentTranscript.length &&
+      rebuilt.every((entry, index) => typeof entry.text === "string")
+    ) {
+      currentTranscript = rebuilt;
+    }
+  }
+
+  renderTranscript();
+  // Persist the punctuated transcript so subsequent loads don't pay the AI
+  // call again. saveToCache is fire-and-forget — failures here are silent.
+  if (typeof saveToCache === "function" && currentVideoId) {
+    saveToCache(currentVideoId).catch(() => {});
+  }
+}
+
 // --- Auto-scroll state (follow video playback in transcript) ---
 let autoScrollEnabled = true; // True = scroll transcript to follow video playback
 let autoScrollInterval = null; // setInterval ID for polling video time
@@ -96,8 +259,101 @@ const TRANSCRIPT_SEGMENT_LIMITS = Object.freeze({
   maxSeconds: 20,
 });
 
+// ============================================================
+// CHINESE PUNCTUATION RESTORE
+// ============================================================
+// AI subtitles from sources like Bilibili arrive as a single wall of Chinese
+// with no sentence breaks. Reading them on screen is exhausting, so we run a
+// lightweight local pass that inserts a comma at common connectives. It is
+// deliberately conservative — it never adds a terminal period, because that
+// would break the segment grouper's cross-entry sentence reconstruction. The
+// pass runs before normalizeCaptionText so the inserted commas survive every
+// downstream whitespace/quote tightening step unchanged.
+
+// Patterns used to detect CJK punctuation and Han characters. We rely on the
+// Unicode CJK Symbols and Punctuation block plus the Halfwidth/Fullwidth
+// Forms block so that every flavour of Chinese comma, period, semicolon,
+// colon, etc. short-circuits the restore.
+const CHINESE_PUNCTUATION_PATTERN = /[\u3000-\u303f\uff00-\uffef]/;
+const CHINESE_CHARACTER_PATTERN = /[\u4e00-\u9fff]/;
+
+// Mid-sentence connectives: a comma is inserted BEFORE these when the marker
+// is preceded by a non-punctuation, non-space character (so it never fires
+// at the very start of the text or right after another comma). Longer
+// phrases come first so the substring "比如" never matches inside "比如说".
+// The "那么" entry gets an extra "没" / "不" / "有" exclusion so the
+// colloquial fixed expressions "没那么严重" / "不那么重要" / "有那么回事"
+// stay intact instead of being shredded with a spurious comma. Note that
+// "没那么严重" parses as 没 + 有 + 那么 + 严重, so the character directly
+// preceding "那么" is "有", not "没" — both must sit in the exclusion set.
+const CHINESE_MID_MARKER_PATTERNS = [
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(也就是说)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(比如说)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(但是)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(不过)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(可是)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(然而)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(因为)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(所以)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(因此)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(如果)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(假如)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef没不有])(那么)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(既然)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(虽然)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(尽管)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(即使)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(而且)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(或者)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(例如)/g,
+  /(?<=[^\s\u3000-\u303f\uff00-\uffef])(比如)/g,
+];
+
+// Sentence-leading transitions: a comma is inserted AFTER these when the
+// marker is followed by a Chinese character that is not punctuation. The
+// lookahead also implicitly blocks re-firing on already-punctuated text.
+const CHINESE_START_MARKERS = [
+  "首先", "其次", "再次", "然后", "接着", "后来",
+  "另外", "此外", "其实", "实际上", "总之", "总的来说",
+  "换句话说", "换言之", "因此", "最后",
+];
+
+/**
+ * Restores light punctuation to an unpunctuated Chinese transcript line so
+ * the original text shown in the side panel is easier to read.
+ *
+ * The pass is idempotent and side-effect free:
+ *   - text that already contains any CJK punctuation is returned unchanged
+ *     (so re-running on a partly restored line, or on transcripts that
+ *     arrived pre-punctuated, is safe);
+ *   - text without any Han characters is returned unchanged (English,
+ *     numbers and platform noise are left alone);
+ *   - never inserts a terminal period, so the segment grouper's cross-entry
+ *     sentence reconstruction stays correct.
+ */
+function punctuateChineseText(text) {
+  if (typeof text !== "string" || !text) return text;
+  if (CHINESE_PUNCTUATION_PATTERN.test(text)) return text;
+  if (!CHINESE_CHARACTER_PATTERN.test(text)) return text;
+
+  let result = text;
+
+  for (const marker of CHINESE_START_MARKERS) {
+    // marker followed by a Han character → "marker，"
+    const regex = new RegExp(`(${marker})(?=[\\u4e00-\\u9fff])`, "g");
+    result = result.replace(regex, "$1，");
+  }
+
+  for (const regex of CHINESE_MID_MARKER_PATTERNS) {
+    regex.lastIndex = 0;
+    result = result.replace(regex, "，$1");
+  }
+
+  return result;
+}
+
 function normalizeCaptionText(text) {
-  return String(text || "")
+  return punctuateChineseText(String(text || ""))
     .replace(/\s+/g, " ")
     .replace(/([\u3400-\u9fff])\s+([\u3400-\u9fff])/g, "$1$2")
     .replace(/([，。；：！？])\s+(?=[\u3400-\u9fff])/g, "$1")
@@ -237,7 +493,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     action: "checkConfig",
   });
 
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
+  // Stage 2-1: prefer the per-platform `transcriptKeysStatus` shape that
+  // background.js now sends. The legacy `hasSupadataKey` alias is kept as
+  // a fallback so older background scripts still gate the side panel.
+  // A user might only have configured one platform — we let the panel open
+  // for ANY configured transcript key. The per-platform key is enforced
+  // later by the adapter's fetchTranscript (e.g. NO_BILIBILI_COOKIE).
+  const transcriptKeysStatus = configStatus.transcriptKeysStatus || {};
+  const hasAnyTranscriptKey =
+    !!transcriptKeysStatus.youtube ||
+    !!transcriptKeysStatus.bilibili ||
+    !!configStatus.hasSupadataKey;
+  if (!hasAnyTranscriptKey || !configStatus.hasAiKey) {
     showConfigError(configStatus);
     return;
   }
@@ -311,12 +578,19 @@ function panelIsShowingResults() {
 }
 
 /**
- * Reacts to the URL now in front of the panel: close on non-YouTube,
- * refresh the digest when the video changed.
+ * Reacts to the URL now in front of the panel: close on a URL no adapter
+ * recognises, refresh the digest when the video changed.
+ *
+ * YouTube used to be the only supported host, so the panel would close
+ * itself on any non-YouTube URL. Now that the platform list is open
+ * (Bilibili ships first; Vimeo / X / 抖音 can be added later just by
+ * registering a new adapter), we keep the panel open on every URL any
+ * registered adapter claims.
  */
 function handleFrontTabUrl(url) {
-  if (!(url || "").startsWith("https://www.youtube.com")) {
-    // Panel is a YouTube-only tool — remove itself from non-YouTube tabs.
+  const adapter = (typeof YTD_PLATFORMS !== "undefined" && YTD_PLATFORMS.findByUrl(url)) || null;
+  if (!adapter) {
+    // No adapter recognises this URL — the panel has no UI for it.
     window.close();
     return;
   }
@@ -423,35 +697,30 @@ function setNotesFilter(showAll) {
 // VIDEO DETECTION
 // ============================================================
 
+/**
+ * Find the first tab whose URL a registered platform adapter recognises.
+ * Mirrors the strategy background.js uses for `relayToContent` so the
+ * panel can drive YouTube and Bilibili (and any future platform adapter)
+ * with the same lookup, instead of hard-coding the YouTube origin.
+ */
+async function findActiveAdapterTab() {
+  const tabs = await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+  });
+  if (tabs[0] && YTD_PLATFORMS.findByUrl(tabs[0].url)) return tabs[0];
+
+  const active = await chrome.tabs.query({ active: true });
+  const matched = active.find((tab) => YTD_PLATFORMS.findByUrl(tab.url));
+  if (matched) return matched;
+
+  const all = await chrome.tabs.query({});
+  return all.find((tab) => YTD_PLATFORMS.findByUrl(tab.url)) || null;
+}
+
 async function checkCurrentTab() {
   try {
-    // Try multiple strategies to find the YouTube tab
-    let tab = null;
-
-    // Strategy 1: Active tab in last focused window
-    let tabs = await chrome.tabs.query({
-      active: true,
-      lastFocusedWindow: true,
-    });
-    if (tabs[0]?.url?.includes("youtube.com")) {
-      tab = tabs[0];
-    }
-
-    // Strategy 2: Any active YouTube tab
-    if (!tab) {
-      tabs = await chrome.tabs.query({
-        url: "https://www.youtube.com/*",
-        active: true,
-      });
-      if (tabs[0]) tab = tabs[0];
-    }
-
-    // Strategy 3: Any YouTube tab (last resort)
-    if (!tab) {
-      tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
-      if (tabs[0]) tab = tabs[0];
-    }
-
+    const tab = await findActiveAdapterTab();
     debugLog("[YouTube Digest Panel] Found tab:", tab?.id, tab?.url);
 
     if (!tab?.url) {
@@ -460,7 +729,8 @@ async function checkCurrentTab() {
     }
 
     // Store the tab ID for reliable messaging later
-    youtubeTabId = tab.id;
+    activeTabId = tab.id;
+    activeAdapter = YTD_PLATFORMS.findByUrl(tab.url);
 
     const videoId = extractVideoId(tab.url);
 
@@ -500,23 +770,15 @@ async function checkCurrentTab() {
 
 function extractVideoId(url) {
   try {
-    const urlObj = new URL(url);
-
-    if (
-      urlObj.hostname.includes("youtube.com") &&
-      urlObj.searchParams.has("v")
-    ) {
-      return urlObj.searchParams.get("v");
+    // Delegate to whichever registered adapter claims this URL. A future
+    // platform (Vimeo, X, 抖音, ...) automatically gets video-id parsing
+    // by registering itself with platforms/adapter-base.js — no edits
+    // to the side panel are required.
+    const adapter = (typeof YTD_PLATFORMS !== "undefined" && YTD_PLATFORMS.findByUrl(url)) || null;
+    if (adapter) {
+      const id = adapter.extractVideoId(url);
+      if (id) return id;
     }
-
-    if (urlObj.hostname === "youtu.be") {
-      return urlObj.pathname.slice(1);
-    }
-
-    if (urlObj.pathname.startsWith("/embed/")) {
-      return urlObj.pathname.split("/")[2];
-    }
-
     return null;
   } catch {
     return null;
@@ -580,6 +842,20 @@ async function startDigest(videoId, videoUrl) {
     showState("results");
     document.getElementById("tabsNav").style.display = "flex";
 
+    // Fire-and-forget AI punctuation pass on cached transcripts that may
+    // still be in their raw, unpunctuated state (the cache predates this
+    // feature). Same graceful-degradation contract as the fetch path below.
+    const cachedTimestampedText = currentTranscriptTimestamped;
+    const cachedTitle = currentVideoTitle;
+    const cachedVideoId = videoId;
+    if (cachedTimestampedText) {
+      requestAiPunctuation(cachedTimestampedText, cachedTitle)
+        .then((result) => {
+          if (result) applyAiPunctuationResult(result, cachedVideoId);
+        })
+        .catch(() => {});
+    }
+
     // Load notes for this video
     loadNotes(videoId);
 
@@ -637,6 +913,21 @@ async function startDigest(videoId, videoUrl) {
   renderTranscript();
   showState("results");
   document.getElementById("tabsNav").style.display = "flex";
+
+  // Fire-and-forget AI punctuation pass. The UI is already readable with
+  // the raw text; the AI version (when it lands) silently replaces the
+  // cached state and re-renders. Failures degrade to the local heuristic
+  // that runs inside normalizeCaptionText — no user-facing error.
+  const timestampedTextForPunctuation = currentTranscriptTimestamped;
+  const titleForPunctuation = currentVideoTitle;
+  const videoIdForPunctuation = currentVideoId;
+  if (timestampedTextForPunctuation) {
+    requestAiPunctuation(timestampedTextForPunctuation, titleForPunctuation)
+      .then((result) => {
+        if (result) applyAiPunctuationResult(result, videoIdForPunctuation);
+      })
+      .catch(() => {});
+  }
 
   // Load notes for this video
   loadNotes(videoId);
@@ -875,7 +1166,17 @@ function copyTranscript() {
 
 function exportTranscript() {
   const transcriptContent = currentTranscriptText || "";
-  const videoUrl = `https://youtube.com/watch?v=${currentVideoId}`;
+  // Build a platform-correct canonical URL via the active adapter so the
+  // export link matches whichever host produced the transcript (YouTube
+  // watch URL, Bilibili /video/BV... URL, etc.).
+  let videoUrl = currentVideoUrl || "";
+  if (activeAdapter && currentVideoId) {
+    try {
+      videoUrl = activeAdapter.canonicalUrl(currentVideoId);
+    } catch (_) {
+      // Adapter rejected the id (e.g. av id not supported) — keep the raw URL.
+    }
+  }
 
   let exportText = "";
   exportText += `TRANSCRIPT\n`;
@@ -941,8 +1242,25 @@ function showError(title, message) {
 
 function showConfigError(configStatus) {
   const missingKeys = [];
-  if (!configStatus.hasSupadataKey) missingKeys.push("Supadata");
-  if (!configStatus.hasAiKey) missingKeys.push("AI provider");
+  // Stage 2-1: read the per-platform status. Fall back to the legacy
+  // `hasSupadataKey` alias so an older background script still surfaces
+  // the right copy. Future adapters (e.g. bilibili) will add their own
+  // branch here so the message names the exact missing provider.
+  const transcriptKeysStatus = configStatus.transcriptKeysStatus || {};
+  if (!transcriptKeysStatus.youtube && !configStatus.hasSupadataKey) {
+    missingKeys.push("Supadata");
+  }
+  if (!configStatus.hasAiKey) {
+    // Stage 3: name the active AI provider in the missing-key copy so the
+    // user knows exactly which service needs a key. Falls back to the
+    // generic label when the background script is older than the
+    // provider-aware checkConfig payload.
+    const aiLabel =
+      (typeof configStatus.aiProviderLabel === "string" &&
+        configStatus.aiProviderLabel.trim()) ||
+      "AI provider";
+    missingKeys.push(aiLabel);
+  }
 
   showState("error");
   document.getElementById("errorTitle").textContent = "API Keys Missing";
@@ -1048,10 +1366,10 @@ async function seekTo(seconds) {
   };
 
   try {
-    // Try direct messaging to the stored YouTube tab first (fastest/reliable)
-    if (youtubeTabId) {
+    // Try direct messaging to the stored active tab first (fastest/reliable)
+    if (activeTabId) {
       try {
-        await chrome.tabs.sendMessage(youtubeTabId, payload);
+        await chrome.tabs.sendMessage(activeTabId, payload);
         debugLog("[YouTube Digest Panel] seekTo direct success");
         return;
       } catch (directErr) {
@@ -1333,6 +1651,20 @@ function getTranscriptContext(selectedText) {
 // ============================================================
 
 /**
+ * Returns the cache key for a given video, scoped by platform adapter so
+ * the same alphanumeric ID on different platforms doesn't collide.
+ * Falls back to `"unknown"` when no adapter matches — better to keep a
+ * stale-but-unique key than to throw away the user's cache.
+ */
+function getCacheKey(videoId) {
+  const adapter = currentVideoUrl
+    ? YTD_PLATFORMS.findByUrl(currentVideoUrl)
+    : null;
+  const adapterId = adapter?.id || "unknown";
+  return `digest_${adapterId}_${videoId}`;
+}
+
+/**
  * Saves the current digest results to persistent local storage.
  * Results survive browser restarts — reopening the same video loads from cache
  * without consuming API tokens or Supadata calls.
@@ -1362,10 +1694,11 @@ async function saveToCache(videoId) {
       timestamp: Date.now(),
     };
 
-    await chrome.storage.local.set({ [`digest_${videoId}`]: cacheData });
+    const cacheKey = getCacheKey(videoId);
+    await chrome.storage.local.set({ [cacheKey]: cacheData });
     debugLog(
       "Saved to cache:",
-      videoId,
+      cacheKey,
       currentAnalysis ? "(with analysis)" : "(transcript only)",
     );
 
@@ -1426,15 +1759,16 @@ async function loadFromCache(videoId) {
   if (!videoId) return null;
 
   try {
-    const result = await chrome.storage.local.get(`digest_${videoId}`);
-    const cached = result[`digest_${videoId}`];
+    const cacheKey = getCacheKey(videoId);
+    const result = await chrome.storage.local.get(cacheKey);
+    const cached = result[cacheKey];
 
     if (!cached) return null;
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
     if (Date.now() - cached.timestamp > THIRTY_DAYS) {
-      await chrome.storage.local.remove(`digest_${videoId}`);
+      await chrome.storage.local.remove(cacheKey);
       return null;
     }
 
@@ -2079,7 +2413,43 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   sendTranslationMessage,
   groupTranscriptEntries,
   splitOversizedThought,
+  normalizeCaptionText,
   alignTranslatedSegmentBatch,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  punctuateChineseText,
+  // Stage t07: punctuation restore. The two helpers drive the AI pass that
+  // adds Chinese sentence punctuation to transcripts that arrived without any
+  // (typical of B-station AI captions). Tests need both functions so they can
+  // mock chrome.runtime.sendMessage for requestAiPunctuation and verify
+  // applyAiPunctuationResult rebuilds the per-entry text from the punctuated
+  // timestamped output.
+  requestAiPunctuation,
+  applyAiPunctuationResult,
+  // State accessors. Module-level `let` bindings don't surface on the
+  // sandbox's global object, so tests poke the values through these helpers
+  // instead of trying to assign `sandbox.currentVideoId = ...` from outside
+  // (which would silently no-op). Each key is checked independently so a
+  // partial payload only touches the fields it mentions.
+  __setTranscriptState: (state) => {
+    if (!state || typeof state !== "object") return;
+    if (Object.prototype.hasOwnProperty.call(state, "videoId")) {
+      currentVideoId = state.videoId;
+    }
+    if (Object.prototype.hasOwnProperty.call(state, "transcriptText")) {
+      currentTranscriptText = state.transcriptText;
+    }
+    if (Object.prototype.hasOwnProperty.call(state, "transcriptTimestamped")) {
+      currentTranscriptTimestamped = state.transcriptTimestamped;
+    }
+    if (Object.prototype.hasOwnProperty.call(state, "transcript")) {
+      currentTranscript = state.transcript;
+    }
+  },
+  __getTranscriptState: () => ({
+    videoId: currentVideoId,
+    transcriptText: currentTranscriptText,
+    transcriptTimestamped: currentTranscriptTimestamped,
+    transcript: currentTranscript,
+  }),
 };
