@@ -68,6 +68,9 @@ var YTD_SETTINGS = (() => {
     // so users get readable B-station captions out of the box; the option
     // page exposes the toggle so users on tight AI quotas can opt out.
     aiPunctuationEnabled: true,
+    // Token for pushing video digest to Notescollection. When empty, the
+    // push button in the side panel is disabled.
+    notescollectionToken: "",
   });
 
   function isLegacyCustom(input) {
@@ -135,6 +138,8 @@ var YTD_SETTINGS = (() => {
       aiPunctuationEnabled: hasOwn(input, "aiPunctuationEnabled")
         ? input.aiPunctuationEnabled === true
         : DEFAULTS.aiPunctuationEnabled,
+      // Notescollection push token. Stored as-is; empty means disabled.
+      notescollectionToken: trimString(input?.notescollectionToken),
     };
   }
 

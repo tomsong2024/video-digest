@@ -493,6 +493,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     action: "checkConfig",
   });
 
+  // Stage nc01: Enable the push button if the Notescollection token is configured.
+  const pushBtn = document.getElementById("pushToNotescollectionBtn");
+  if (pushBtn) {
+    pushBtn.disabled = !configStatus.hasNotescollectionToken;
+  }
+
   // Stage 2-1: prefer the per-platform `transcriptKeysStatus` shape that
   // background.js now sends. The legacy `hasSupadataKey` alias is kept as
   // a fallback so older background scripts still gate the side panel.
@@ -652,6 +658,10 @@ function setupEventListeners() {
   document
     .getElementById("exportTranscriptBtn")
     ?.addEventListener("click", exportTranscript);
+  // Stage nc01: Push to Notescollection
+  document
+    .getElementById("pushToNotescollectionBtn")
+    ?.addEventListener("click", pushToNotescollection);
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     button.addEventListener("click", () => {
       handleTranscriptModeChange(button.dataset.transcriptMode);
@@ -744,16 +754,24 @@ async function checkCurrentTab() {
           payload: { action: "getVideoInfo" },
         });
         debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
-        if (result.success && result.response) {
+        if (result && result.response) {
           currentVideoTitle = result.response.title || "";
           currentChannelName = result.response.channelName || "";
           currentVideoDescription = result.response.description || "";
           currentVideoDuration = result.response.duration || 0;
         }
+        // Fallback: try to get title from tab URL if still empty
+        if (!currentVideoTitle && tab) {
+          if (tab.title) {
+            currentVideoTitle = tab.title;
+          }
+        }
       } catch (e) {
         console.error("[YouTube Digest Panel] getVideoInfo error:", e);
-        currentVideoTitle = "";
-        currentChannelName = "";
+        // Fallback: try to get title from tab
+        if (tab && tab.title) {
+          currentVideoTitle = tab.title;
+        }
         currentVideoDescription = "";
         currentVideoDuration = 0;
       }
@@ -883,10 +901,13 @@ async function startDigest(videoId, videoUrl) {
 
   showState("loading");
   updateLoading("Fetching transcript", "");
-
+  
   const transcriptResult = await chrome.runtime.sendMessage({
     action: "fetchTranscript",
     videoId: videoId,
+    videoTitle: currentVideoTitle,
+    channelName: currentChannelName,
+    description: currentVideoDescription,
   });
 
   if (!transcriptResult.success) {
@@ -1164,7 +1185,7 @@ function copyTranscript() {
   copyToClipboardWithFeedback(currentTranscriptText || "", "copyTranscriptBtn");
 }
 
-function exportTranscript() {
+async function exportTranscript() {
   const transcriptContent = currentTranscriptText || "";
   // Build a platform-correct canonical URL via the active adapter so the
   // export link matches whichever host produced the transcript (YouTube
@@ -1177,6 +1198,20 @@ function exportTranscript() {
       // Adapter rejected the id (e.g. av id not supported) — keep the raw URL.
     }
   }
+
+  // Get notes for this video
+  let notesText = "";
+  try {
+    const notesResult = await chrome.runtime.sendMessage({
+      action: "getNotes",
+      videoId: currentVideoId,
+    });
+    if (notesResult.success && notesResult.notes && notesResult.notes.length > 0) {
+      notesText = notesResult.notes
+        .map((n) => `[${n.timestamp}] ${n.text}`)
+        .join("\n");
+    }
+  } catch (_) {}
 
   let exportText = "";
   exportText += `TRANSCRIPT\n`;
@@ -1191,12 +1226,61 @@ function exportTranscript() {
     exportText += `\n${"—".repeat(60)}\n\n`;
   }
 
+  if (notesText) {
+    exportText += `NOTES:\n${notesText}\n`;
+    exportText += `\n${"-".repeat(60)}\n\n`;
+  }
+
   exportText += `TRANSCRIPT:\n\n${transcriptContent}\n`;
   exportText += `\n${"—".repeat(60)}\n`;
   exportText += `Exported by YouTube Digest\n`;
 
   const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
   downloadTextFile(exportText, filename);
+}
+
+// Stage nc01: Push video digest to Notescollection.
+async function pushToNotescollection() {
+  const btn = document.getElementById("pushToNotescollectionBtn");
+  if (!btn || !currentVideoId) {
+    alert("No video loaded. Please load a video first.");
+    return;
+  }
+
+  // Disable button and show loading state.
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "...";
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "pushToNotescollection",
+      videoId: currentVideoId,
+    });
+
+    if (result && result.success) {
+      // Success feedback.
+      btn.textContent = "Done";
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.disabled = false;
+      }, 2000);
+    } else if (result && result.error === "NO_TOKEN") {
+      alert("Please configure your Notescollection Token in Settings first.");
+      btn.textContent = originalText;
+      btn.disabled = false;
+    } else {
+      // Show error.
+      const msg = result?.error || "Unknown error";
+      alert(`Push failed: ${msg}`);
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }
+  } catch (error) {
+    alert(`Network error, please try again. ${error.message}`);
+    btn.textContent = originalText;
+    btn.disabled = false;
+  }
 }
 
 // ============================================================
@@ -1674,6 +1758,8 @@ async function saveToCache(videoId) {
   if (!videoId || !currentTranscript) return;
 
   try {
+    const cacheKey = getCacheKey(videoId);
+    
     // Persist semantic-segment translations for this video.
     const paragraphCacheForVideo = {};
     for (const [key, value] of transcriptParagraphCache.entries()) {
@@ -1682,19 +1768,22 @@ async function saveToCache(videoId) {
       }
     }
 
+    // Merge with existing cache to preserve metadata from adapter (videoTitle, description, etc.)
+    const existingCache = (await chrome.storage.local.get(cacheKey))[cacheKey] || {};
+    
     const cacheData = {
+      ...existingCache, // Preserve metadata from adapter
       analysis: currentAnalysis, // May be null if not yet analyzed
       transcript: currentTranscript,
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
-      videoTitle: currentVideoTitle,
-      channelName: currentChannelName,
+      videoTitle: currentVideoTitle || existingCache.videoTitle,
+      channelName: currentChannelName || existingCache.channelName,
       paragraphCache: paragraphCacheForVideo,
       timestamp: Date.now(),
     };
 
-    const cacheKey = getCacheKey(videoId);
     await chrome.storage.local.set({ [cacheKey]: cacheData });
     debugLog(
       "Saved to cache:",

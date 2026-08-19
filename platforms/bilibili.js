@@ -269,7 +269,13 @@
       }
       throw new Error(`Bilibili view API failed: ${reason}`);
     }
-    return data.data.cid;
+    // Return full video metadata including title, description, owner name
+    return {
+      cid: data.data.cid,
+      title: data.data.title || "",
+      description: data.data.desc || "",
+      ownerName: data.data.owner?.name || "",
+    };
   }
 
   /**
@@ -551,7 +557,7 @@
     };
   }
 
-  async function fetchTranscript({ videoId, settings }) {
+  async function fetchTranscript({ videoId, settings, metadata }) {
     const sessdata = readSessdataCookie(settings);
     if (!sessdata) {
       return {
@@ -583,9 +589,9 @@
       };
     }
 
-    let cid;
+    let videoMetadata;
     try {
-      cid = await fetchViewMetadata(normalizedId, sessdata);
+      videoMetadata = await fetchViewMetadata(normalizedId, sessdata);
     } catch (err) {
       return {
         success: false,
@@ -603,7 +609,7 @@
     // has no subtitles" case resolves cleanly to NO_TRANSCRIPT below.
     let subtitleList;
     try {
-      subtitleList = await fetchSubtitleList(normalizedId, cid, sessdata);
+      subtitleList = await fetchSubtitleList(normalizedId, videoMetadata.cid, sessdata);
     } catch (err) {
       return {
         success: false,
@@ -649,6 +655,27 @@
         error: "EMPTY_TRANSCRIPT",
         message: "Bilibili returned an empty subtitle body.",
       };
+    }
+
+    // Store full digest (metadata + transcript) in cache for Notescollection push.
+    // Use API metadata as fallback for missing fields.
+    if (metadata && metadata.videoId) {
+      const cacheKey = `digest_${metadata.adapterId || "bilibili"}_${metadata.videoId}`;
+      const cacheEntry = {
+        videoTitle: metadata.videoTitle || videoMetadata?.title || "",
+        channelName: metadata.channelName || videoMetadata?.ownerName || "",
+        description: metadata.description || videoMetadata?.description || "",
+        videoUrl: metadata.videoUrl || "",
+        videoId: metadata.videoId,
+        adapterId: metadata.adapterId || "bilibili",
+        transcript: parsed.transcript,
+        transcriptText: parsed.transcriptText,
+        transcriptTextTimestamped: parsed.transcriptTextTimestamped,
+        cachedAt: Date.now(),
+      };
+      chrome.storage.local.set({
+        [cacheKey]: cacheEntry,
+      }).catch(() => {});
     }
 
     return {

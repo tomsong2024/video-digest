@@ -795,13 +795,34 @@ function extractVideoInfo() {
   const descriptionSelector = selector("descriptionElement");
   const videoSelector = selector("videoElement");
 
+  // Try direct page properties first (more reliable than shadow DOM selectors)
+  // document.title format: "Video Title - Channel Name"
+  let title = "";
+  let channelName = "";
+  if (document.title && document.title.includes(" - ")) {
+    const parts = document.title.split(" - ");
+    title = parts.slice(0, -1).join(" - ").trim();
+    channelName = parts[parts.length - 1].trim();
+  } else if (document.title) {
+    title = document.title;
+  }
+
+  // Try shadow DOM selectors as fallback
   const titleElement = titleSelector
     ? document.querySelector(titleSelector)
     : null;
+  if (titleElement) {
+    const text = titleElement.textContent?.trim();
+    if (text) title = text;
+  }
 
   const channelElement = channelSelector
     ? document.querySelector(channelSelector)
     : null;
+  if (channelElement) {
+    const text = channelElement.textContent?.trim();
+    if (text) channelName = text;
+  }
 
   const videoElement = videoSelector
     ? document.querySelector(videoSelector)
@@ -812,8 +833,8 @@ function extractVideoInfo() {
     : null;
 
   return {
-    title: titleElement?.textContent?.trim() || "",
-    channelName: channelElement?.textContent?.trim() || "",
+    title: title || "",
+    channelName: channelName || "",
     duration: videoElement?.duration || 0,
     description: descriptionElement?.textContent?.trim() || "",
   };

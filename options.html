@@ -124,6 +124,26 @@
             Each digest uses one extra AI call. Disable to fall back to the
             local heuristic.
           </p>
+
+          <!-- Stage nc01: Notescollection push token. When set, the side panel
+               shows a push button that sends the current video's digest to the
+               Notescollection API. -->
+          <label for="notescollectionToken" data-i18n="notescollectionTokenLabel"
+            >Notescollection push token</label
+          >
+          <input
+            id="notescollectionToken"
+            name="notescollectionToken"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste your Notescollection token"
+          />
+          <p class="help" data-i18n="notescollectionTokenHelp">
+            Enter your Notescollection API token to enable one-click push.
+            The token is used to authenticate requests to
+            https://api.notescollection.site.
+          </p>
         </section>
 
         <div class="form-actions">

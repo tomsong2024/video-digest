@@ -208,7 +208,7 @@
     throw new Error("Transcript job timed out after 60 seconds");
   }
 
-  async function fetchTranscript({ videoId, settings }) {
+  async function fetchTranscript({ videoId, settings, metadata = {} }) {
     // Transcript-provider keys live in `settings.transcriptKeys.youtube`
     // after Stage 2-1. We still tolerate the legacy top-level
     // `supadataApiKey` alias so direct callers and pre-normalize shapes
@@ -303,7 +303,8 @@
         message: "Supadata returned an empty transcript for this video.",
       };
     }
-    return {
+
+    const result = {
       success: true,
       source: "native",
       transcript: parsed.transcript,
@@ -311,6 +312,22 @@
       transcriptTextTimestamped: parsed.transcriptTextTimestamped,
       language: parsed.language,
     };
+
+    // Store full digest (metadata + transcript) in cache for Notescollection push.
+    if (metadata && metadata.videoId) {
+      const cacheKey = `digest_${metadata.adapterId || "youtube"}_${metadata.videoId}`;
+      chrome.storage.local.set({
+        [cacheKey]: {
+          ...metadata,
+          transcript: parsed.transcript,
+          transcriptText: parsed.transcriptText,
+          transcriptTextTimestamped: parsed.transcriptTextTimestamped,
+          cachedAt: Date.now(),
+        },
+      }).catch(() => {});
+    }
+
+    return result;
   }
 
   globalThis.YTD_PLATFORMS.register({

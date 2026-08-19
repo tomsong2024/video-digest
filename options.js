@@ -29,6 +29,10 @@ const YTD_OPTIONS = (() => {
       aiPunctuationLabel: "AI add punctuation to Chinese transcripts",
       aiPunctuationDescription:
         "Each digest uses one extra AI call. Disable to fall back to the local heuristic.",
+      // Stage nc01: Notescollection push token.
+      notescollectionTokenLabel: "Notescollection push token",
+      notescollectionTokenHelp:
+        "Enter your Notescollection API token to enable one-click push. The token is used to authenticate requests to https://api.notescollection.site.",
       saveSettings: "Save settings",
       localRemix: "Local remix",
       customizationTitle: "Want to use another AI model?",
@@ -100,6 +104,10 @@ const YTD_OPTIONS = (() => {
       aiPunctuationLabel: "用 AI 为中文 transcript 加标点",
       aiPunctuationDescription:
         "每次摘要会额外调用一次 AI。关闭后会回退到本地启发式加标点。",
+      // Stage nc01: Notescollection push token.
+      notescollectionTokenLabel: "Notescollection 推送令牌",
+      notescollectionTokenHelp:
+        "填写 Notescollection API 令牌以启用一键推送。该令牌用于向 https://api.notescollection.site 验证请求。",
       saveSettings: "保存设置",
       localRemix: "本地改造",
       customizationTitle: "想使用其他 AI 模型？",
@@ -526,6 +534,8 @@ const YTD_OPTIONS = (() => {
     // loadSettings() and saveSettings() so the value round-trips through
     // chrome.storage.local as settings.aiPunctuationEnabled.
     const aiPunctuationEnabledInput = doc.getElementById("aiPunctuationEnabled");
+    // Stage nc01: Notescollection push token input.
+    const notescollectionTokenInput = doc.getElementById("notescollectionToken");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -767,6 +777,10 @@ const YTD_OPTIONS = (() => {
           if (!input) continue;
           input.value = settingsApi.transcriptKeyFor(settings, adapterId) || "";
         }
+        // Stage nc01: hydrate the Notescollection push token.
+        if (notescollectionTokenInput) {
+          notescollectionTokenInput.value = settings.notescollectionToken || "";
+        }
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -833,6 +847,10 @@ const YTD_OPTIONS = (() => {
         // value just defaults to `false` instead of throwing.
         aiPunctuationEnabled:
           aiPunctuationEnabledInput && aiPunctuationEnabledInput.checked,
+        // Stage nc01: read the Notescollection push token.
+        notescollectionToken: notescollectionTokenInput
+          ? notescollectionTokenInput.value.trim()
+          : "",
       });
 
       if (!hasPlatformKey) {

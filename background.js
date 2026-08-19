@@ -399,6 +399,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleFetchTranscript({
       videoId: message.videoId,
       videoUrl: message.videoUrl,
+      videoTitle: message.videoTitle,
+      channelName: message.channelName,
+      description: message.description,
     })
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -525,6 +528,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           provider: providerId,
           aiProviderLabel:
             YTD_SETTINGS.aiProviderField(providerId, "label") || providerId,
+          // Stage nc01: expose the Notescollection token status so the side
+          // panel can enable/disable the push button.
+          hasNotescollectionToken: !!settings.notescollectionToken,
         });
       })
       .catch((error) => sendResponse({ error: error.message }));
@@ -535,6 +541,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.runtime.openOptionsPage();
     sendResponse({ success: true });
     return false;
+  }
+
+  // Stage nc01: Push current video digest to Notescollection.
+  if (message.action === "pushToNotescollection") {
+    handlePushToNotescollection(message.videoId)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
   }
 
   if (message.action === "openSidePanel") {
@@ -803,7 +817,7 @@ async function getPlayerVideoDetails(tabId) {
  *   callers that only know videoId keep working during the migration.
  * @returns {Promise<TranscriptResult>}
  */
-async function handleFetchTranscript({ videoId, videoUrl } = {}) {
+async function handleFetchTranscript({ videoId, videoUrl, videoTitle, channelName, description } = {}) {
   try {
     // Resolve the URL in priority order: explicit arg → active tab.
     let resolvedUrl = typeof videoUrl === "string" && videoUrl ? videoUrl : null;
@@ -829,8 +843,22 @@ async function handleFetchTranscript({ videoId, videoUrl } = {}) {
       };
     }
 
+    // Build cache key and store video metadata alongside the transcript.
+    const cacheData = {
+      videoTitle: videoTitle || "",
+      channelName: channelName || "",
+      description: description || "",
+      videoUrl: resolvedUrl || "",
+      videoId,
+      adapterId: adapter.id,
+      cachedAt: Date.now(),
+    };
+    // Store metadata first (async, don't block transcript fetch)
+    const cacheKey = `digest_${adapter.id}_${videoId}`;
+    chrome.storage.local.set({ [cacheKey]: cacheData }).catch(() => {});
+
     const settings = await getSettings();
-    return await adapter.fetchTranscript({ videoId, settings });
+    return await adapter.fetchTranscript({ videoId, settings, metadata: cacheData });
   } catch (error) {
     console.error("[YTD] Transcript fetch error:", error);
     return {
@@ -1450,6 +1478,198 @@ async function handleDeleteNote(noteId) {
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+}
+
+// ============================================================
+// NOTESCOLLECTION PUSH (Stage nc01)
+// ============================================================
+
+const NOTESCOLLECTION_API_URL =
+  "https://api.notescollection.site/api/collections/e6d2104f-4273-4fb7-9aa4-d3d172653173/feedback";
+
+/**
+ * Builds a Markdown-formatted string from the digest data.
+ * Formats transcript with timestamps for better readability.
+ */
+function buildMarkdownContent(digest, videoNotes) {
+  const lines = [];
+
+  // Title
+  lines.push(`# ${digest?.videoTitle || "Unknown Video"}`);
+  lines.push("");
+
+  // Metadata block
+  lines.push("---");
+  if (digest?.videoUrl) {
+    lines.push(`**Video:** [${digest.videoTitle || "Unknown Video"}](${digest.videoUrl})`);
+  } else {
+    lines.push(`**Video:** ${digest?.videoTitle || "Unknown Video"}`);
+  }
+  if (digest?.channelName) {
+    lines.push(`**Channel:** ${digest.channelName}`);
+  }
+  if (videoNotes.length > 0) {
+    lines.push(`**Notes:** ${videoNotes.length} saved`);
+  }
+  lines.push(`**Exported:** ${new Date().toLocaleString()}`);
+  lines.push("---");
+  lines.push("");
+
+  // Video description/remarks section
+  if (digest?.description && digest.description.trim()) {
+    lines.push("## Description");
+    lines.push("");
+    // Split description into paragraphs
+    const descParagraphs = digest.description
+      .split(/\n{2,}/)
+      .map(p => p.trim())
+      .filter(p => p.length > 0);
+    for (const para of descParagraphs) {
+      lines.push(para);
+      lines.push("");
+    }
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+
+  // Notes section
+  if (videoNotes.length > 0) {
+    lines.push("## Notes");
+    lines.push("");
+    for (const note of videoNotes) {
+      const time = note.timestamp || "";
+      const text = note.text || "";
+      lines.push(`> **[${time}]** ${text}`);
+    }
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+
+  // Transcript section - use timestamped version if available
+  const transcriptText = digest?.transcriptTextTimestamped || digest?.transcriptText || "";
+  
+  if (transcriptText) {
+    lines.push("## Transcript");
+    lines.push("");
+    
+    // Check if it's timestamped format [MM:SS] text
+    const timestampPattern = /\[(\d+):(\d{2})\]\s*(.+)/g;
+    const hasTimestamps = timestampPattern.test(transcriptText);
+    
+    if (hasTimestamps) {
+      // Format with timestamps - each line as a blockquote
+      const cleanPattern = /\[(\d+):(\d{2})\]\s*(.+)/g;
+      let match;
+      while ((match = cleanPattern.exec(transcriptText)) !== null) {
+        const mins = match[1];
+        const secs = match[2];
+        const text = match[3].trim();
+        lines.push(`> **${mins}:${secs}** ${text}`);
+      }
+    } else {
+      // Plain text - try to split into sentences
+      // Split by common sentence endings
+      const sentences = transcriptText
+        .replace(/([。！？.!?])/g, '$1\n')
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+      
+      for (const sentence of sentences) {
+        lines.push(sentence);
+        lines.push("");
+      }
+    }
+  }
+
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  lines.push(`*Exported by YouTube Digest*`);
+
+  return lines.join("\n");
+}
+
+/**
+ * Pushes the current video's digest (transcript + notes) to Notescollection.
+ *
+ * @param {string} videoId - The video ID to push.
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function handlePushToNotescollection(videoId) {
+  const settings = await getSettings();
+  const token = settings.notescollectionToken;
+
+  if (!token) {
+    return { success: false, error: "NO_TOKEN" };
+  }
+
+  try {
+    // Gather video info and notes.
+    const result = await chrome.storage.local.get("ytd_notes");
+    const allNotes = result.ytd_notes || [];
+    const videoNotes = allNotes.filter((n) => n.videoId === videoId);
+
+    // Try to get the cached digest for the video.
+    // Try to find adapter from notes first, then fall back to querying tabs.
+    let adapterId = videoNotes[0]?.adapterId;
+    let videoUrl = videoNotes[0]?.videoUrl;
+    
+    if (!adapterId) {
+      // Try to find the active tab with a matching adapter
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tabs[0]?.url) {
+        const adapter = YTD_PLATFORMS.findByUrl(tabs[0].url);
+        if (adapter) {
+          adapterId = adapter.id;
+          videoUrl = tabs[0].url;
+        }
+      }
+    }
+    
+    // Last resort: default to youtube
+    adapterId = adapterId || "youtube";
+    
+    const cacheKey = `digest_${adapterId}_${videoId}`;
+    const cachedDigest = await chrome.storage.local.get(cacheKey);
+    const digest = cachedDigest[cacheKey];
+
+    // Build Markdown-formatted content.
+    const content = buildMarkdownContent(digest, videoNotes);
+
+    // Build the push payload with Markdown content.
+    const payload = {
+      feedbackContent: content,
+    };
+
+    // Make the API call.
+    const response = await fetch(NOTESCOLLECTION_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      console.warn(
+        `[YouTube Digest] Notescollection push failed: ${response.status} ${response.statusText} ${errorText}`.slice(0, 300),
+      );
+      return {
+        success: false,
+        error: `HTTP ${response.status}: ${response.statusText}`,
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.warn("[YouTube Digest] Notescollection push error:", error.message);
+    return { success: false, error: "NETWORK_ERROR" };
   }
 }
 
