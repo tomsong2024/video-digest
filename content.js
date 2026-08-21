@@ -23,7 +23,6 @@ const debugLog = (...args) => {
 let activeAdapter = null;
 let ytdNoteButton = null;
 let ytdNoteButtonTimer = null;
-let ytdNoteKeyboardListenerAdded = false;
 let ytdNoteButtonRetryTimer = null;
 let ytdDigestButton = null;
 let digestButtonObserver = null;
@@ -44,12 +43,6 @@ function init() {
   // listeners so it doesn't fight other content scripts on shared hosts.
   activeAdapter = YTD_PLATFORMS.findByUrl(location.href);
   if (!activeAdapter) return;
-
-  // Register the global "n" keyboard shortcut once
-  if (!ytdNoteKeyboardListenerAdded) {
-    document.addEventListener("keydown", handleNoteKeyboardShortcut);
-    ytdNoteKeyboardListenerAdded = true;
-  }
 
   // Try to inject the buttons immediately
   injectDigestButton();
@@ -206,13 +199,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Jump the video to a specific timestamp
     debugLog("[YouTube Digest Content] Seeking to:", message.seconds);
     seekToTimestamp(message.seconds);
-    sendResponse({ success: true });
-    return false;
-  }
-
-  if (message.action === "showNoteSavedFeedback") {
-    // Show brief feedback that note was saved
-    showNoteSavedToast(message.note);
     sendResponse({ success: true });
     return false;
   }
@@ -503,20 +489,19 @@ function injectNoteButton() {
 
   debugLog("[YouTube Digest Content] Injecting note button");
 
-  // Create the note button — a soft rounded pill that floats over the player
-  const noteButton = document.createElement("button");
-  noteButton.id = "ytd-note-button";
-  noteButton.innerHTML = `
+  // Create the push/digest button — a soft rounded pill that floats over the player
+  const pushButton = document.createElement("button");
+  pushButton.id = "ytd-push-button";
+  pushButton.innerHTML = `
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="margin-right: 7px;">
-      <path d="M12 20h9"></path>
-      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+      <polygon points="5 3 19 12 5 21 5 3"></polygon>
     </svg>
-    <span>Note</span>
+    <span>Push</span>
   `;
 
   // Soft rounded pill in the terracotta accent, with a gentle shadow.
   // Start hidden; visibility is controlled by mouse activity.
-  noteButton.style.cssText = `
+  pushButton.style.cssText = `
     position: absolute;
     top: 16px;
     right: 16px;
@@ -539,7 +524,7 @@ function injectNoteButton() {
     box-shadow: 0 4px 14px rgba(0,0,0,0.3);
   `;
 
-  ytdNoteButton = noteButton;
+  ytdNoteButton = pushButton;
 
   // Show button when mouse enters or moves over the player.
   // Hide after 2 seconds of idle or when the mouse leaves.
@@ -560,28 +545,45 @@ function injectNoteButton() {
   });
 
   // Hover effect — lift slightly
-  noteButton.addEventListener("mouseenter", () => {
-    noteButton.style.background = "#b25742";
-    noteButton.style.boxShadow = "0 6px 18px rgba(0,0,0,0.35)";
-    noteButton.style.transform = "translateY(-1px)";
+  pushButton.addEventListener("mouseenter", () => {
+    pushButton.style.background = "#b25742";
+    pushButton.style.boxShadow = "0 6px 18px rgba(0,0,0,0.35)";
+    pushButton.style.transform = "translateY(-1px)";
   });
 
-  noteButton.addEventListener("mouseleave", () => {
-    noteButton.style.background = "#c8674f";
-    noteButton.style.boxShadow = "0 4px 14px rgba(0,0,0,0.3)";
-    noteButton.style.transform = "translateY(0)";
+  pushButton.addEventListener("mouseleave", () => {
+    pushButton.style.background = "#c8674f";
+    pushButton.style.boxShadow = "0 4px 14px rgba(0,0,0,0.3)";
+    pushButton.style.transform = "translateY(0)";
   });
 
-  // Click handler — save the current moment as a note
-  noteButton.addEventListener("click", async (e) => {
+  // Click handler — open the side panel (same as Digest button)
+  pushButton.addEventListener("click", async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    await saveCurrentNote();
+
+    debugLog("[YouTube Digest] Push button clicked");
+
+    // Send message to background script to open side panel
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: "openSidePanel",
+      });
+      debugLog("[YouTube Digest] openSidePanel response:", result);
+    } catch (err) {
+      if (isExtensionContextLost(err)) {
+        console.warn(
+          "[YouTube Digest] Extension context invalidated; refresh the page so the side panel can open.",
+        );
+        return;
+      }
+      console.error("[YouTube Digest] Failed to open side panel:", err);
+    }
   });
 
-  playerContainer.appendChild(noteButton);
+  playerContainer.appendChild(pushButton);
 
-  debugLog("[YouTube Digest Content] Note button injected");
+  debugLog("[YouTube Digest Content] Push button injected");
 }
 
 function showNoteButton() {
@@ -601,182 +603,6 @@ function resetNoteButtonTimer() {
   ytdNoteButtonTimer = setTimeout(() => {
     hideNoteButton();
   }, 2000);
-}
-
-/**
- * Handles the "n" keyboard shortcut for saving a note.
- * Only triggers on YouTube watch pages and when the user is not typing
- * in an input field.
- */
-function handleNoteKeyboardShortcut(e) {
-  if (!isVideoPage()) return;
-  if (e.key !== "n" && e.key !== "N") return;
-
-  // Ignore if the user is typing in an input/textarea/contenteditable
-  const active = document.activeElement;
-  if (
-    active &&
-    (active.tagName === "INPUT" ||
-      active.tagName === "TEXTAREA" ||
-      active.isContentEditable)
-  ) {
-    return;
-  }
-
-  // Prevent YouTube's own "n" shortcut (e.g. next video in playlist)
-  e.preventDefault();
-  e.stopPropagation();
-
-  // Show brief visual feedback on the button, then save
-  showNoteButton();
-  resetNoteButtonTimer();
-  saveCurrentNote();
-}
-
-/**
- * Captures the current timestamp and saves it as a note.
- */
-async function saveCurrentNote() {
-  debugLog("[YouTube Digest] Saving note");
-
-  const videoSelector = selector("videoElement");
-  const video = videoSelector ? document.querySelector(videoSelector) : null;
-  if (!video) {
-    console.error("[YouTube Digest] No video element found");
-    return;
-  }
-
-  // Go back 3 seconds to capture what was just said (user reacts after hearing it)
-  const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
-  const videoInfo = extractVideoInfo();
-  const videoId = activeAdapter ? activeAdapter.extractVideoId(location.href) : null;
-
-  const noteButton = ytdNoteButton;
-  const originalContent = noteButton ? noteButton.innerHTML : "";
-
-  if (noteButton) {
-    noteButton.innerHTML =
-      '<span style="letter-spacing: 0.2px;">SAVING...</span>';
-    noteButton.style.pointerEvents = "none";
-  }
-
-  try {
-    const result = await chrome.runtime.sendMessage({
-      action: "saveNote",
-      videoId: videoId,
-      timestamp: currentTime,
-      videoTitle: videoInfo.title,
-      channelName: videoInfo.channelName,
-    });
-
-    if (result.success) {
-      if (noteButton) {
-        noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">SAVED</span>';
-        noteButton.style.background = "#7c8b6f";
-      }
-      showNoteSavedToast(result.note);
-    } else {
-      if (noteButton) {
-        noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">ERROR</span>';
-      }
-      console.error("[YouTube Digest] Save note error:", result.error);
-    }
-  } catch (err) {
-    if (noteButton) {
-      noteButton.innerHTML =
-        '<span style="letter-spacing: 0.2px;">ERROR</span>';
-    }
-    if (isExtensionContextLost(err)) {
-      // The extension was reloaded/updated/disabled while this content
-      // script was still running — its chrome.runtime.* calls now fail.
-      // Demote to warn and surface a "REFRESH" hint on the button so
-      // the user knows the next click will work after a page reload.
-      console.warn(
-        "[YouTube Digest] Extension context invalidated; refresh the page to save notes again.",
-      );
-      if (noteButton) {
-        noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">REFRESH</span>';
-        noteButton.style.background = "#7c8b6f";
-      }
-      return;
-    }
-    console.error("[YouTube Digest] Save note exception:", err);
-  }
-
-  setTimeout(() => {
-    if (noteButton) {
-      noteButton.innerHTML = originalContent;
-      noteButton.style.background = "#c8674f";
-      noteButton.style.pointerEvents = "auto";
-    }
-  }, 2000);
-}
-
-/**
- * Shows a toast notification when a note is saved.
- */
-function showNoteSavedToast(note) {
-  // Remove existing toast
-  const existing = document.getElementById("ytd-note-toast");
-  if (existing) existing.remove();
-
-  const toast = document.createElement("div");
-  toast.id = "ytd-note-toast";
-  toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 Note saved</div>
-    <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
-    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
-    <div style="margin-top: 10px; font-size: 11px;">
-      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 Copy link</a>
-    </div>
-  `;
-
-  toast.style.cssText = `
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    z-index: 999999;
-    background: #ffffff;
-    border: 1px solid #ece5d9;
-    border-radius: 14px;
-    padding: 16px 20px;
-    max-width: 350px;
-    box-shadow: 0 12px 32px rgba(50, 42, 32, 0.2);
-    font-family: system-ui, -apple-system, "Roboto", sans-serif;
-    animation: ytdSlideIn 0.3s ease;
-  `;
-
-  // Add animation keyframes
-  const style = document.createElement("style");
-  style.textContent = `
-    @keyframes ytdSlideIn {
-      from { transform: translateX(100%); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
-    }
-  `;
-  document.head.appendChild(style);
-
-  // Copy link handler
-  toast.querySelector("a").addEventListener("click", async (e) => {
-    e.preventDefault();
-    try {
-      await navigator.clipboard.writeText(note.timestampedUrl);
-      e.target.textContent = "✓ Copied!";
-    } catch (err) {
-      console.error("Copy failed:", err);
-    }
-  });
-
-  document.body.appendChild(toast);
-
-  // Auto-dismiss after 5 seconds
-  setTimeout(() => {
-    toast.style.animation = "ytdSlideIn 0.3s ease reverse";
-    setTimeout(() => toast.remove(), 300);
-  }, 5000);
 }
 
 // ============================================================
@@ -889,12 +715,6 @@ function seekToTimestamp(seconds) {
   }
 }
 
-function escapeHtmlForContent(text) {
-  const div = document.createElement("div");
-  div.textContent = text || "";
-  return div.innerHTML;
-}
-
 // ============================================================
 // PAGE NAVIGATION DETECTION
 // ============================================================
@@ -918,8 +738,8 @@ function spaNavHandler() {
       .querySelectorAll("#ytd-digest-button")
       .forEach((button) => button.remove());
     ytdDigestButton = null;
-    const strayNote = document.getElementById("ytd-note-button");
-    if (strayNote) strayNote.remove();
+    const strayPush = document.getElementById("ytd-push-button");
+    if (strayPush) strayPush.remove();
     ytdNoteButton = null;
     return;
   }
@@ -938,10 +758,10 @@ function spaNavHandler() {
     digestButtonReconcileTimer = null;
   }
 
-  const existingNoteButton = document.getElementById("ytd-note-button");
-  if (existingNoteButton) existingNoteButton.remove();
+  const existingPushButton = document.getElementById("ytd-push-button");
+  if (existingPushButton) existingPushButton.remove();
 
-  // Reset note button state
+  // Reset push button state
   ytdNoteButton = null;
   clearTimeout(ytdNoteButtonTimer);
   ytdNoteButtonTimer = null;
@@ -949,10 +769,6 @@ function spaNavHandler() {
     clearInterval(ytdNoteButtonRetryTimer);
     ytdNoteButtonRetryTimer = null;
   }
-
-  // Remove any toasts
-  const existingToast = document.getElementById("ytd-note-toast");
-  if (existingToast) existingToast.remove();
 
   // Re-inject buttons for the new video (with a small delay for the page
   // to render). The adapter's matches() decides whether we're still on a

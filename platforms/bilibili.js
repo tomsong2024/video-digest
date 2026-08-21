@@ -696,14 +696,14 @@
     getMainWorldScript: getMainWorldScript,
     fetchTranscript: fetchTranscript,
     playerSelectors: {
-      // Bilibili renders the toolbar as `.video-toolbar` with an inner
-      // left/right split. The "like / coin / favorite / share" row lives
-      // inside `.toolbar-left`; we preprend the Digest button there.
-      actionBarRow: ".video-toolbar, .toolbar",
+      // Bilibili renders the toolbar as `.video-toolbar-container` (new) or
+      // `.video-toolbar` (legacy). We try both to support multiple B站 UI versions.
+      actionBarRow: ".video-toolbar-container, .video-toolbar, .toolbar",
+      // The left-side button group that holds like/coin/fav/share buttons.
       actionBarGroup:
-        ".video-toolbar .toolbar-left, .video-toolbar-left, .toolbar-left",
+        ".video-toolbar-container .video-toolbar-left-main, .video-toolbar-container .video-toolbar-left, .video-toolbar-left-main, .video-toolbar-left, .toolbar-left",
       actionBarFallback:
-        ".video-toolbar, .toolbar, #toolbar, .bpx-player-toolbar",
+        ".video-toolbar-container, .video-toolbar, .toolbar, #arc_toolbar_report",
       playerContainer:
         "#bilibili-player, .bilibili-player, .bpx-player-container, .bpx-player",
       videoElement: "video",
